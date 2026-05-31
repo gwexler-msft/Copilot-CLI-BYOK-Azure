@@ -1,0 +1,7 @@
+name: copilot-cli-byok-azure
+metadata:
+  template: copilot-cli-byok-azure@1.0.0
+infra:
+  provider: bicep
+  path: infra
+  module: main

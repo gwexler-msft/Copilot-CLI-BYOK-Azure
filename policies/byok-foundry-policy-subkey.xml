@@ -1,0 +1,129 @@
+<policies>
+  <inbound>
+    <base />
+
+    <!-- ===== AUTH MODE: APIM SUBSCRIPTION KEY =====================================
+         This API is configured with subscriptionRequired=true and the subscription-key
+         parameter mapped to the 'api-key' header (see apim-foundry-api.bicep). Copilot CLI
+         BYOK 'azure' mode puts COPILOT_PROVIDER_API_KEY into the 'api-key' header, so the
+         per-developer APIM subscription key rides there and APIM validates it NATIVELY
+         (returning 401 on a missing/invalid key) BEFORE this policy runs. There is no
+         validate-jwt here; identity for telemetry/throttling comes from the subscription.
+         ============================================================================ -->
+
+    <!-- 1. Developer identity = the APIM subscription that authenticated the call. -->
+    <set-variable name="developerOid" value="@(context.Subscription?.Id ?? "unknown")" />
+    <set-variable name="developerUpn" value="@(context.Subscription?.Name ?? context.Subscription?.Id ?? "unknown")" />
+
+    <!-- 2. Requested model/deployment comes from the request BODY ("model": "..."). -->
+    <set-variable name="deploymentName" value="@{
+        try {
+            var body = context.Request.Body?.As<JObject>(preserveContent: true);
+            return (string)(body?["model"]?.ToString()) ?? "unknown";
+        } catch { return "unknown"; }
+    }" />
+
+    <!-- 2a. Guard: fail fast with 400 if we could not read a model name from the body. -->
+    <choose>
+      <when condition="@(string.IsNullOrEmpty((string)context.Variables["deploymentName"]) || (string)context.Variables["deploymentName"] == "unknown")">
+        <return-response>
+          <set-status code="400" reason="Could not determine model from request body" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":{"code":"ModelNotSpecified","message":"Could not parse a 'model' field from the JSON request body. Ensure the body is valid JSON, e.g. {\"model\":\"&lt;deployment&gt;\",\"messages\":[...]}. (A common cause is shell quote mangling of the JSON payload.)"}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 2b. Backend selection. This is the DEFAULT route: traffic goes to Foundry (AIServices)
+         unless the requested model is pinned to the legacy AOAI backend via the
+         comma-separated {{aoai-pinned-models}} named value. -->
+    <set-variable name="routeToAoai" value="@{
+        var pinned = "{{aoai-pinned-models}}".Split(new[]{','}, System.StringSplitOptions.RemoveEmptyEntries);
+        var model = ((string)context.Variables["deploymentName"]).Trim().ToLowerInvariant();
+        foreach (var m in pinned) { if (m.Trim().ToLowerInvariant() == model) { return true; } }
+        return false;
+    }" />
+    <set-variable name="backendName" value="@((bool)context.Variables["routeToAoai"] ? "aoai" : "foundry")" />
+
+    <emit-metric name="copilot_byok_request" value="1" namespace="copilot.byok">
+      <dimension name="developer_oid" value="@((string)context.Variables["developerOid"])" />
+      <dimension name="developer_upn" value="@((string)context.Variables["developerUpn"])" />
+      <dimension name="deployment_name" value="@((string)context.Variables["deploymentName"])" />
+      <dimension name="backend" value="@((string)context.Variables["backendName"])" />
+    </emit-metric>
+
+    <!-- 3. Throttling lives at PRODUCT scope (apim-products.bicep): rate-limit-by-key,
+         azure-openai-token-limit (TPM), and quota-by-key, all keyed on the subscription.
+         The developer's product tier (e.g. byok-standard / byok-power) selects the numbers.
+         No rate-limit here so the product tier is authoritative. -->
+
+    <!-- 4. Strip the dev's credential before going to the backend. APIM normally removes the
+         subscription-key header itself, but we delete both for belt-and-suspenders. -->
+    <set-header name="api-key" exists-action="delete" />
+    <set-header name="Authorization" exists-action="delete" />
+
+    <!-- 5. Determine the AOAI-style operation from the path (common to both backends). -->
+    <set-variable name="aoaiOp" value="@{
+        var p = context.Request.OriginalUrl.Path.ToLowerInvariant();
+        if (p.EndsWith("/chat/completions")) { return "chat/completions"; }
+        if (p.EndsWith("/embeddings")) { return "embeddings"; }
+        return "completions";
+    }" />
+
+    <!-- 6. Mint a managed identity token for the chosen backend and route to it.
+         Both surfaces share the OpenAI-compatible MI audience (cognitiveservices.azure.*),
+         but keep them as separate named values so they can diverge later. -->
+    <choose>
+      <when condition="@((bool)context.Variables["routeToAoai"])">
+        <authentication-managed-identity resource="{{aoai-mi-audience}}" />
+        <set-backend-service base-url="{{aoai-private-base-url}}" />
+      </when>
+      <otherwise>
+        <authentication-managed-identity resource="{{foundry-mi-audience}}" />
+        <set-backend-service base-url="{{foundry-private-base-url}}" />
+      </otherwise>
+    </choose>
+
+    <!-- 7. Rewrite the OpenAI-style /v1/<op> path to the deployment-scoped data-plane path
+         the backend expects: /openai/deployments/{model}/<op>. Identical for both backends. -->
+    <rewrite-uri template="@("/openai/deployments/" + (string)context.Variables["deploymentName"] + "/" + (string)context.Variables["aoaiOp"])" copy-unmatched-params="true" />
+
+    <!-- 8. Force a known-good api-version (Copilot CLI omits/hardcodes it; see #3208). -->
+    <set-query-parameter name="api-version" exists-action="override">
+      <value>{{aoai-default-api-version}}</value>
+    </set-query-parameter>
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+
+    <!-- Parse the 'usage' object from a JSON response and emit token metrics. -->
+    <choose>
+      <when condition="@(context.Response.StatusCode == 200 && (context.Response.Headers.GetValueOrDefault("Content-Type","").StartsWith("application/json")))">
+        <set-variable name="responseBody" value="@(context.Response.Body.As<JObject>(preserveContent: true))" />
+        <emit-metric name="copilot_byok_prompt_tokens"     value="@((double)(int)(((JObject)context.Variables["responseBody"])?["usage"]?["prompt_tokens"] ?? 0))" namespace="copilot.byok">
+          <dimension name="developer_oid"   value="@((string)context.Variables["developerOid"])" />
+          <dimension name="developer_upn"   value="@((string)context.Variables["developerUpn"])" />
+          <dimension name="deployment_name" value="@((string)context.Variables["deploymentName"])" />
+          <dimension name="backend"         value="@((string)context.Variables["backendName"])" />
+        </emit-metric>
+        <emit-metric name="copilot_byok_completion_tokens" value="@((double)(int)(((JObject)context.Variables["responseBody"])?["usage"]?["completion_tokens"] ?? 0))" namespace="copilot.byok">
+          <dimension name="developer_oid"   value="@((string)context.Variables["developerOid"])" />
+          <dimension name="developer_upn"   value="@((string)context.Variables["developerUpn"])" />
+          <dimension name="deployment_name" value="@((string)context.Variables["deploymentName"])" />
+          <dimension name="backend"         value="@((string)context.Variables["backendName"])" />
+        </emit-metric>
+      </when>
+    </choose>
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

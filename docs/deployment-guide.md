@@ -62,9 +62,27 @@ of these once per machine — the versions are the floors this repo is validated
   setups, **activate User Access Administrator as an eligible (PIM) role for the deployment
   window only**; you can deactivate it after the deployment completes. With this active, the
   deployment grants both MI roles itself — there is **no follow-up step**. If you cannot get
-  `roleAssignments/write`, set `assignAoaiRbac=false` and have an Owner/UAA run the out-of-band
-  grant for **both** accounts (Step 3).
+  `roleAssignments/write`, set `assignAoaiRbac=false` and let the **postprovision hook** (or
+  an Owner/UAA running [`scripts/grant-apim-mi-rbac`](../scripts/grant-apim-mi-rbac.ps1))
+  grant both accounts out-of-band (Step 3).
 - For the Gov pilot, sign in with an account in your Gov tenant (`*.onmicrosoft.us`).
+
+> **Automated by `azd` hooks.** [azure.yaml](../azure.yaml) wires two hooks so you don't have
+> to remember these steps:
+> - **`preprovision`** → [`scripts/check-deploy-access`](../scripts/check-deploy-access.ps1)
+>   inspects your effective subscription roles and reports whether you can (a) create
+>   resources (Owner/Contributor) and (b) write role assignments (Owner / User Access
+>   Administrator / RBAC Administrator). It **aborts** the deploy if you lack resource-creation
+>   rights, and fails fast on missing RBAC rights when `assignAoaiRbac=true`
+>   (set `azd env set assignAoaiRbac true|false` to match your params file; default behavior
+>   when unset is warn-and-continue).
+> - **`postprovision`** → [`scripts/grant-apim-mi-rbac`](../scripts/grant-apim-mi-rbac.ps1)
+>   resolves the APIM MI principalId (it changes on every recreate) and idempotently grants
+>   `Cognitive Services OpenAI User` on the AOAI **and** Foundry accounts. Safe in both modes:
+>   when `assignAoaiRbac=true` it just re-confirms the in-template grant (`az` returns the
+>   existing assignment); when `false` it is the grant. Both hooks use `az`'s direct RBAC API,
+>   which **works for a constrained (ABAC-conditioned) Owner** even though the in-template
+>   path does not (see note in Step 3).
 
 ```pwsh
 # Commercial pilot
@@ -274,6 +292,30 @@ role, so an Owner/UAA must grant `Cognitive Services OpenAI User` on **each depl
 but `401 PermissionDenied` ("Principal does not have access to API/Operation") on the Foundry
 `/openai` path, because the MI cannot reach the Foundry backend.
 
+**Easiest: run the script** (this is exactly what the `postprovision` hook runs, so an `azd`
+deploy already does it for you — use this only for the raw `az deployment` path or to re-grant
+manually). It resolves the MI principalId and both account scopes automatically and is
+idempotent:
+
+```pwsh
+./scripts/grant-apim-mi-rbac.ps1 `
+  -ResourceGroup rg-copilot-byok-<envName> `
+  -ApimName <apimName> `
+  -AoaiAccountName <aoaiName> `
+  -FoundryAccountName <foundryName>
+# bash: ./scripts/grant-apim-mi-rbac.sh <rg> <apimName> <aoaiName> <foundryName>
+```
+
+> **Constrained (ABAC) Owner caveat.** A *conditional* Owner can create these grants via the
+> **direct** RBAC API (`az role assignment create`, which the script uses) but the **identical**
+> assignment **fails inside the ARM nested template** — the ABAC `@Request` condition is not
+> evaluated the same way in ARM role-assignment creation as in the direct API, so the template
+> path defaults to deny. If you hold a constrained Owner, **set `assignAoaiRbac=false`** and let
+> the script / `postprovision` hook do the grant. Re-running `azd auth login` does **not** help;
+> this is an ARM-vs-RBAC-API evaluation difference, not token staleness.
+
+Equivalent manual commands (what the script automates):
+
 ```pwsh
 # $rg = your deployed RG: rg-copilot-byok-gov-pilot (Gov) or rg-copilot-byok-comm-pilot (Commercial).
 $rg = "rg-copilot-byok-<envName>"
@@ -285,6 +327,11 @@ az role assignment create --assignee-object-id $apimMi --assignee-principal-type
 az role assignment create --assignee-object-id $apimMi --assignee-principal-type ServicePrincipal `
   --role "Cognitive Services OpenAI User" --scope $foundry
 ```
+
+> **Do not mix manual grants with `assignAoaiRbac=true`.** A manual `az` grant gets a random
+> GUID name while the Bicep module uses a deterministic `guid()` name; with both modes active
+> on the same scope you can hit a `RoleAssignmentExists` collision that fails the module. Pick
+> one path: in-template (`true`, unconstrained Owner/UAA) **or** out-of-band (`false` + script).
 
 ### Human playground / direct data-plane access
 

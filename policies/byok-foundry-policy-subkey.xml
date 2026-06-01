@@ -36,6 +36,105 @@
       </when>
     </choose>
 
+    <!-- 2a2. TIERED AUTO MODEL-ROUTING. When the caller sends the sentinel model
+         ({{auto-route-sentinel}}, default "auto") we pick a deployment instead of forwarding it
+         verbatim: the cheap "mini" tier for short, non-coding prompts and the full model
+         otherwise. Level 1 is this in-policy heuristic (prompt length + coding-signal scan).
+         Level 2 is an OPTIONAL classifier-model call (off unless {{auto-route-classifier-enabled}}
+         is "true") that only runs for the ambiguous band around the threshold. The resolved name
+         overwrites deploymentName so all downstream backend selection / metrics / rewrite see the
+         actual model. Explicit (non-sentinel) model names skip this block entirely. -->
+    <set-variable name="autoDecision" value="none" />
+    <set-variable name="isAutoRoute" value="@(((string)context.Variables["deploymentName"]).Trim().ToLowerInvariant() == "{{auto-route-sentinel}}")" />
+    <choose>
+      <when condition="@((bool)context.Variables["isAutoRoute"])">
+        <!-- Concatenate all message text (string or multimodal-array content) to size + scan. -->
+        <set-variable name="autoPromptText" value="@{
+            try {
+                var body = context.Request.Body?.As<JObject>(preserveContent: true);
+                var msgs = body?["messages"] as JArray;
+                if (msgs == null) { return ""; }
+                var sb = new System.Text.StringBuilder();
+                foreach (var m in msgs) {
+                    var content = m["content"];
+                    if (content == null) { continue; }
+                    if (content.Type == JTokenType.String) { sb.Append((string)content); sb.Append('\n'); }
+                    else if (content.Type == JTokenType.Array) {
+                        foreach (var part in (JArray)content) {
+                            var t = part["text"];
+                            if (t != null && t.Type == JTokenType.String) { sb.Append((string)t); sb.Append('\n'); }
+                        }
+                    }
+                }
+                return sb.ToString();
+            } catch { return ""; }
+        }" />
+        <set-variable name="autoIsCoding" value="@{
+            var text = (string)context.Variables["autoPromptText"];
+            if (string.IsNullOrEmpty(text)) { return false; }
+            var rx = new System.Text.RegularExpressions.Regex(@"```|=>|@@ |(^|\n)\s*(def |class |function |func |import |from |#include|public |private |protected |const |let |var |return |if \(|for \(|while \()|;\s*\n|\{\s*\n|\}\s*\n|Traceback|Exception|\.(py|ts|js|tsx|jsx|cs|java|go|rb|cpp|rs|sql|sh|ps1|ya?ml|html|css)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return rx.IsMatch(text);
+        }" />
+        <!-- Level 1 heuristic. -->
+        <set-variable name="autoDecision" value="@{
+            int len = ((string)context.Variables["autoPromptText"]).Length;
+            bool coding = (bool)context.Variables["autoIsCoding"];
+            int threshold = int.Parse("{{auto-route-length-threshold}}");
+            int band = int.Parse("{{auto-route-ambiguous-band}}");
+            if (coding) { return "full"; }
+            if (len >= threshold + band) { return "full"; }
+            if (len < threshold - band) { return "mini"; }
+            return "ambiguous";
+        }" />
+        <!-- Level 2 classifier (opt-in) for the ambiguous band only. -->
+        <choose>
+          <when condition="@((string)context.Variables["autoDecision"] == "ambiguous" &amp;&amp; "{{auto-route-classifier-enabled}}".ToLowerInvariant() == "true")">
+            <authentication-managed-identity resource="{{foundry-mi-audience}}" output-token-variable-name="autoClassifierToken" ignore-error="true" />
+            <send-request mode="new" response-variable-name="autoClassifierResp" timeout="8" ignore-error="true">
+              <set-url>@("{{foundry-private-base-url}}/openai/deployments/{{auto-route-classifier-deployment}}/chat/completions?api-version={{aoai-default-api-version}}")</set-url>
+              <set-method>POST</set-method>
+              <set-header name="Authorization" exists-action="override">
+                <value>@("Bearer " + (string)context.Variables["autoClassifierToken"])</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                  var prompt = (string)context.Variables["autoPromptText"];
+                  if (prompt.Length > 4000) { prompt = prompt.Substring(0, 4000); }
+                  var payload = new JObject(
+                      new JProperty("messages", new JArray(
+                          new JObject(new JProperty("role", "system"), new JProperty("content", "You are a routing classifier. Reply with exactly one lowercase word and nothing else: simple or complex. complex = coding, debugging, multi-step reasoning, or long/technical context; simple = short factual or conversational requests.")),
+                          new JObject(new JProperty("role", "user"), new JProperty("content", prompt))
+                      )),
+                      new JProperty("max_tokens", 1),
+                      new JProperty("temperature", 0)
+                  );
+                  return payload.ToString();
+              }</set-body>
+            </send-request>
+            <set-variable name="autoClassifierLabel" value="@{
+                try {
+                    var resp = (IResponse)context.Variables["autoClassifierResp"];
+                    if (resp == null || resp.StatusCode != 200) { return "error"; }
+                    var j = resp.Body.As<JObject>();
+                    var c = (string)(j["choices"]?[0]?["message"]?["content"]);
+                    return (c ?? "").Trim().ToLowerInvariant();
+                } catch { return "error"; }
+            }" />
+            <!-- Fail-safe: only an explicit "simple" downgrades to mini; error/timeout/anything else -> full. -->
+            <set-variable name="autoDecision" value="@(((string)context.Variables["autoClassifierLabel"]).StartsWith("simple") ? "mini" : "full")" />
+          </when>
+          <when condition="@((string)context.Variables["autoDecision"] == "ambiguous")">
+            <!-- Classifier disabled: ambiguous -> full model (zero added latency, quality-first). -->
+            <set-variable name="autoDecision" value="full" />
+          </when>
+        </choose>
+        <!-- Resolve the sentinel to a real deployment name. -->
+        <set-variable name="deploymentName" value="@((string)context.Variables["autoDecision"] == "mini" ? "{{auto-route-mini-deployment}}" : "{{auto-route-full-deployment}}")" />
+      </when>
+    </choose>
+
     <!-- 2b. Backend selection. This is the DEFAULT route: traffic goes to Foundry (AIServices)
          unless the requested model is pinned to the legacy AOAI backend via the
          comma-separated {{aoai-pinned-models}} named value. -->
@@ -52,6 +151,7 @@
       <dimension name="developer_upn" value="@((string)context.Variables["developerUpn"])" />
       <dimension name="deployment_name" value="@((string)context.Variables["deploymentName"])" />
       <dimension name="backend" value="@((string)context.Variables["backendName"])" />
+      <dimension name="auto_route" value="@((string)context.Variables["autoDecision"])" />
     </emit-metric>
 
     <!-- 3. Throttling lives at PRODUCT scope (apim-products.bicep): rate-limit-by-key,

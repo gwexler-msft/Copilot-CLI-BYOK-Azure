@@ -115,6 +115,13 @@ optionally the APIM-MI → AOAI role assignment (`assignAoaiRbac`), the P2S VPN 
 > **Model/SKU (Gov):** `GlobalStandard` does not exist in usgovvirginia. The pilot uses
 > **gpt-5.1 (2025-11-13) on DataZoneStandard**, capacity 50.
 >
+> **Mini tier (auto-routing):** `deployMiniModel=true` also deploys a cheap tier on each
+> backend — **gpt-4.1-mini (2025-04-14) on DataZoneStandard**, capacity 50 — used when a
+> caller sends the sentinel model `auto`. Confirm the exact mini name/version in your region
+> with `az cognitiveservices model list --location <region>` first (`gpt-5.1-mini` is **not**
+> available in usgovvirginia). Tune routing via the `autoRoute*` params (threshold 500, band
+> 200, classifier off by default). Set `deployMiniModel=false` to skip the tier entirely.
+>
 > **RBAC:** if your deployer lacks `Microsoft.Authorization/roleAssignments/write`, set
 > `assignAoaiRbac=false` and have an Owner/UAA grant the role out-of-band (see below).
 >
@@ -123,6 +130,16 @@ optionally the APIM-MI → AOAI role assignment (`assignAoaiRbac`), the P2S VPN 
 > it is still settling. Once AOAI is `Succeeded`, deploy individual modules at RG scope
 > (e.g. `infra/modules/apim-aoai-api.bicep`, `apim-private-dns.bicep`, `testvm.bicep`)
 > instead of the whole subscription template.
+>
+> **`api-version` floor:** the gateway injects `api-version` from the
+> `aoai-default-api-version` named value (param `defaultAoaiApiVersion`, default
+> `2025-04-01-preview`). `gpt-4.1`/`gpt-5.1` need `2025-04-01-preview` or later; an older
+> value makes a *live* deployment return `404 Resource not found`. If you patch the named
+> value directly on a running APIM, also bump the Bicep default so it survives the next deploy.
+>
+> **`max_tokens` on gpt-5.x:** the `gpt-5.x` family rejects `max_tokens`
+> (`400 ... use 'max_completion_tokens'`); `gpt-4.1-mini` accepts both. When probing the
+> sentinel `auto` route (which can land on either tier), send `max_completion_tokens`.
 
 ### Out-of-band RBAC (only if `assignAoaiRbac=false`)
 

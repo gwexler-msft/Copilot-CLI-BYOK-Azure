@@ -247,6 +247,19 @@ APIM accepts this and:
 > message when the model cannot be parsed, so the failure is not mistaken for a
 > missing deployment.
 
+> **Failure mode — `api-version` too old.** The injected `api-version` comes from the
+> `aoai-default-api-version` named value (Bicep param `defaultAoaiApiVersion`, default
+> `2025-04-01-preview`). The `gpt-4.1` / `gpt-5.1` model families require
+> `2025-04-01-preview` or later — an older value (e.g. `2024-10-21`) makes the backend
+> return `404 Resource not found` even though the deployment exists. If you see a 404
+> from a deployment you know is live, check this named value first.
+
+> **Failure mode — `max_tokens` vs `max_completion_tokens`.** The `gpt-5.x` family
+> rejects `max_tokens` with a `400` (`'max_tokens' is not supported with this model; use
+> 'max_completion_tokens'`). `gpt-4.1-mini` still accepts `max_tokens`. Because the
+> sentinel `auto` route can land on either tier, clients that set a token cap should send
+> `max_completion_tokens` so the request works regardless of which tier the prompt routes to.
+
 ## Backend & routing choices
 
 There are three independent "where does the model live" choices. Two are baked at deploy
@@ -284,6 +297,51 @@ flowchart TD
 - **GitHub SaaS is never the BYOK default.** The whole point of the BYOK wrapper is to
   set `COPILOT_PROVIDER_*` so traffic goes to the private gateway. Leaving those unset is
   the only way the CLI falls back to GitHub's public model endpoint.
+
+### Tiered auto model-routing
+
+A developer can send the **sentinel model `auto`** (instead of a concrete model name) to let
+the gateway pick the cheapest deployment that can handle the request. This deploys a second,
+smaller **"mini" deployment** on each backend (the cheap tier) alongside the full model, and
+adds a routing block to the APIM policy. Explicit model names always bypass routing.
+
+| Tier | Model (Gov pilot) | Used when |
+|---|---|---|
+| **Full** | `gpt-5.1` (DataZoneStandard) | Coding/debugging, long or technical prompts, ambiguous prompts (fail-safe) |
+| **Mini** | `gpt-4.1-mini` (DataZoneStandard) | Short, non-coding, conversational prompts |
+
+The decision is two levels:
+
+```mermaid
+flowchart TD
+    A["Request body model == 'auto'?"] -- "No" --> Explicit["Use the model the caller named<br/>(no routing)"]
+    A -- "Yes" --> L1["Level 1 — in-policy heuristic<br/>(no extra latency)"]
+    L1 --> H1{"coding signals?<br/>(```, def/class, stack traces,<br/>file extensions, etc.)"}
+    H1 -- "Yes" --> Full["Route to FULL model"]
+    H1 -- "No" --> H2{"prompt length vs<br/>threshold ± band"}
+    H2 -- "len ≥ threshold+band" --> Full
+    H2 -- "len < threshold−band" --> Mini["Route to MINI model"]
+    H2 -- "in ambiguous band" --> L2{"classifier enabled?"}
+    L2 -- "No (default)" --> Full
+    L2 -- "Yes" --> Cls["Level 2 — call mini model as<br/>simple/complex classifier (max_tokens:1)"]
+    Cls -- "simple" --> Mini
+    Cls -- "complex / error" --> Full
+```
+
+- **Level 1 (heuristic)** runs entirely in the APIM policy with zero added round-trips: it
+  concatenates all `messages[].content`, scans for coding signals via regex, and compares the
+  total length to `autoRouteLengthThreshold` (default 500 chars) with a ± `autoRouteAmbiguousBand`
+  (default 200) dead-zone.
+- **Level 2 (classifier)** is **off by default** (`autoRouteClassifierEnabled=false`). When on,
+  *only* ambiguous-band prompts trigger a single `max_tokens:1` call to the mini deployment that
+  replies `simple` or `complex`; any non-200/error fails safe to the full model. This adds one
+  round-trip **only** on the ambiguous band.
+- The resolved deployment name overwrites the body `model`, so the token metrics and
+  `rewrite-uri` see the real model. An `auto_route` dimension on the request metric records the
+  decision (`mini` / `full` / `ambiguous` / `none`) for cost analysis.
+- Routing is present in **all four** policy variants (subscription-key and JWT × Foundry and AOAI).
+  Tuning knobs are APIM **named values** (`auto-route-*`), so the threshold, band, and classifier
+  toggle can be changed without redeploying Bicep.
 
 ## Cloud parameterization
 

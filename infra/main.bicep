@@ -76,6 +76,49 @@ param foundryExposedModelName string = apimExposedModelName
 @description('Comma-separated model names the default (Foundry) route should pin to the legacy AOAI backend instead. Empty = all traffic to Foundry.')
 param aoaiPinnedModels string = ''
 
+// ---------------------------------------------------------------------------------------------
+// Auto model-routing (tiered): when a caller sends the sentinel model (default "auto"), APIM
+// picks a cheaper "mini" deployment for short/non-coding prompts and the full model otherwise.
+// Level 1 is an in-policy heuristic (length + coding signals); Level 2 is an optional classifier
+// model call (off by default) for the ambiguous band. Requires a second "mini" deployment on
+// each backend it applies to.
+// ---------------------------------------------------------------------------------------------
+
+@description('Deploy a secondary smaller "mini" model on each backend, used as the cheap tier by auto model-routing.')
+param deployMiniModel bool = true
+
+@description('Mini model name to deploy (the cheap auto-routing tier).')
+param miniModelName string = 'gpt-4.1-mini'
+
+@description('Mini model version. Confirm the exact version available in your region before deploying.')
+param miniModelVersion string = '2025-04-14'
+
+@description('Mini deployment SKU (capacity unit type).')
+@allowed([
+  'Standard'
+  'GlobalStandard'
+  'DataZoneStandard'
+])
+param miniModelDeploymentSku string = 'DataZoneStandard'
+
+@description('Mini deployment capacity (TPM units of 1000).')
+param miniModelCapacity int = 50
+
+@description('Mini exposed/deployment name (the value auto-routing rewrites the body "model" to for the cheap tier).')
+param miniExposedModelName string = 'gpt-4.1-mini'
+
+@description('Sentinel value callers put in the request body "model" to opt in to auto-routing. Explicit model names bypass routing.')
+param autoRouteSentinel string = 'auto'
+
+@description('Auto-routing Level 1: prompt-length threshold (characters across all messages). Shorter non-coding prompts lean to mini, longer to the full model.')
+param autoRouteLengthThreshold int = 500
+
+@description('Auto-routing Level 1: half-width (chars) of the ambiguous band around the threshold. Prompts within [threshold-band, threshold+band) are ambiguous and fall through to Level 2 (or the full model if the classifier is off). Set 0 for a hard threshold with no ambiguous band.')
+param autoRouteAmbiguousBand int = 200
+
+@description('Auto-routing Level 2: enable the classifier-model call for ambiguous prompts. Off = ambiguous prompts go to the full model (zero added latency). On = a max_tokens:1 call to the mini deployment decides simple/complex (adds one round-trip on the ambiguous band only).')
+param autoRouteClassifierEnabled bool = false
+
 @description('Caller credential the APIM gateway requires. subscriptionKey = per-developer APIM subscription key (default, what the customer was sold); jwt = short-lived Entra access token validated by validate-jwt. Switchable per deployment without changing backends.')
 @allowed([
   'subscriptionKey'
@@ -268,6 +311,13 @@ module aoai 'modules/aoai.bicep' = if (deployAoai) {
     modelCapacity: modelCapacity
     apimExposedModelName: apimExposedModelName
     raiPolicyName: raiPolicyName
+    deployMiniModel: deployMiniModel
+    miniModelName: miniModelName
+    miniModelVersion: miniModelVersion
+    miniModelDeploymentSku: miniModelDeploymentSku
+    miniModelCapacity: miniModelCapacity
+    miniExposedModelName: miniExposedModelName
+    miniRaiPolicyName: raiPolicyName
   }
 }
 
@@ -290,6 +340,13 @@ module foundry 'modules/foundry.bicep' = if (deployFoundry) {
     modelCapacity: foundryModelCapacity
     exposedModelName: foundryExposedModelName
     raiPolicyName: raiPolicyName
+    deployMiniModel: deployMiniModel
+    miniModelName: miniModelName
+    miniModelVersion: miniModelVersion
+    miniModelDeploymentSku: miniModelDeploymentSku
+    miniModelCapacity: miniModelCapacity
+    miniExposedModelName: miniExposedModelName
+    miniRaiPolicyName: raiPolicyName
   }
 }
 
@@ -330,6 +387,13 @@ module apimNamedValues 'modules/apim-named-values.bicep' = {
     jwtCallsPerMinute: jwtDefaultCallsPerMinute
     jwtTokensPerMinute: jwtDefaultTokensPerMinute
     jwtMonthlyCallQuota: jwtDefaultMonthlyCallQuota
+    autoRouteSentinel: autoRouteSentinel
+    autoRouteMiniDeployment: miniExposedModelName
+    autoRouteFullDeployment: foundryExposedModelName
+    autoRouteLengthThreshold: autoRouteLengthThreshold
+    autoRouteAmbiguousBand: autoRouteAmbiguousBand
+    autoRouteClassifierEnabled: autoRouteClassifierEnabled
+    autoRouteClassifierDeployment: miniExposedModelName
   }
 }
 

@@ -8,8 +8,8 @@ param apiAppIdUri string
 param apiAudience string
 param requiredScope string
 
-@description('Default api-version APIM injects when caller omits it.')
-param defaultAoaiApiVersion string = '2024-10-21'
+@description('Default api-version APIM injects when caller omits it. Must be recent enough for the deployed models (gpt-4.1/gpt-5.1 require 2025-04-01-preview or later).')
+param defaultAoaiApiVersion string = '2025-04-01-preview'
 
 @description('Private base URL of the classic AOAI (kind=OpenAI) account. Empty when AOAI not deployed.')
 param aoaiPrivateBaseUrl string = ''
@@ -34,6 +34,27 @@ param jwtTokensPerMinute int = 60000
 
 @description('jwt mode: per-developer hard monthly call ceiling (calls per 30 days) keyed on Entra oid.')
 param jwtMonthlyCallQuota int = 200000
+
+@description('Auto-routing: sentinel model value that opts a request in to tiered routing.')
+param autoRouteSentinel string = 'auto'
+
+@description('Auto-routing: deployment name for the cheap (mini) tier.')
+param autoRouteMiniDeployment string = ''
+
+@description('Auto-routing: deployment name for the full (expensive) tier.')
+param autoRouteFullDeployment string = ''
+
+@description('Auto-routing Level 1: prompt-length threshold (chars).')
+param autoRouteLengthThreshold int = 500
+
+@description('Auto-routing Level 1: half-width of the ambiguous band around the threshold.')
+param autoRouteAmbiguousBand int = 200
+
+@description('Auto-routing Level 2: enable the classifier-model call for ambiguous prompts.')
+param autoRouteClassifierEnabled bool = false
+
+@description('Auto-routing Level 2: deployment name used as the classifier (max_tokens:1 simple/complex).')
+param autoRouteClassifierDeployment string = ''
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -169,6 +190,76 @@ resource nvJwtQuota 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
   }
 }
 
+resource nvAutoSentinel 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-sentinel'
+  properties: {
+    displayName: 'auto-route-sentinel'
+    value: empty(autoRouteSentinel) ? 'auto' : autoRouteSentinel
+    secret: false
+  }
+}
+
+resource nvAutoMini 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-mini-deployment'
+  properties: {
+    displayName: 'auto-route-mini-deployment'
+    value: empty(autoRouteMiniDeployment) ? 'unset' : autoRouteMiniDeployment
+    secret: false
+  }
+}
+
+resource nvAutoFull 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-full-deployment'
+  properties: {
+    displayName: 'auto-route-full-deployment'
+    value: empty(autoRouteFullDeployment) ? 'unset' : autoRouteFullDeployment
+    secret: false
+  }
+}
+
+resource nvAutoThreshold 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-length-threshold'
+  properties: {
+    displayName: 'auto-route-length-threshold'
+    value: string(autoRouteLengthThreshold)
+    secret: false
+  }
+}
+
+resource nvAutoBand 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-ambiguous-band'
+  properties: {
+    displayName: 'auto-route-ambiguous-band'
+    value: string(autoRouteAmbiguousBand)
+    secret: false
+  }
+}
+
+resource nvAutoClassifierEnabled 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-classifier-enabled'
+  properties: {
+    displayName: 'auto-route-classifier-enabled'
+    value: autoRouteClassifierEnabled ? 'true' : 'false'
+    secret: false
+  }
+}
+
+resource nvAutoClassifierDeployment 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'auto-route-classifier-deployment'
+  properties: {
+    displayName: 'auto-route-classifier-deployment'
+    value: empty(autoRouteClassifierDeployment) ? 'unset' : autoRouteClassifierDeployment
+    secret: false
+  }
+}
+
 output namedValueIds array = [
   nvOpenId.id
   nvAppIdUri.id
@@ -183,4 +274,11 @@ output namedValueIds array = [
   nvJwtCalls.id
   nvJwtTokens.id
   nvJwtQuota.id
+  nvAutoSentinel.id
+  nvAutoMini.id
+  nvAutoFull.id
+  nvAutoThreshold.id
+  nvAutoBand.id
+  nvAutoClassifierEnabled.id
+  nvAutoClassifierDeployment.id
 ]

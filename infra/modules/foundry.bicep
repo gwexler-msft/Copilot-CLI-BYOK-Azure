@@ -35,6 +35,15 @@ param exposedModelName string
 @description('Content-filter (responsible-AI) policy name applied to the deployment. Microsoft.DefaultV2 is the built-in default; set to a custom raiPolicy name (see scripts/configure-content-filter) to tighten or loosen filtering.')
 param raiPolicyName string = 'Microsoft.DefaultV2'
 
+@description('Deploy a secondary smaller "mini" model on this account (the cheap tier used by APIM auto-routing).')
+param deployMiniModel bool = false
+param miniModelName string = ''
+param miniModelVersion string = ''
+param miniModelDeploymentSku string = ''
+param miniModelCapacity int = 0
+param miniExposedModelName string = ''
+param miniRaiPolicyName string = 'Microsoft.DefaultV2'
+
 var nameBody = take(replace(toLower('${namePrefix}${envName}${suffix}'), '-', ''), 56)
 var foundryName = 'aif${nameBody}'
 var peName      = take('pe-foundry-${envName}-${suffix}', 80)
@@ -72,6 +81,28 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
     }
     raiPolicyName: raiPolicyName
   }
+}
+
+// Optional secondary "mini" deployment (cheap tier for APIM auto-routing). Serialized after the
+// primary deployment via dependsOn so the two PUTs on the same account do not race.
+resource miniDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (deployMiniModel) {
+  parent: foundry
+  name: miniExposedModelName
+  sku: {
+    name: miniModelDeploymentSku
+    capacity: miniModelCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: miniModelName
+      version: miniModelVersion
+    }
+    raiPolicyName: miniRaiPolicyName
+  }
+  dependsOn: [
+    modelDeployment
+  ]
 }
 
 resource pe 'Microsoft.Network/privateEndpoints@2024-01-01' = {

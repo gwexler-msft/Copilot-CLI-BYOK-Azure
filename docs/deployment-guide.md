@@ -270,9 +270,11 @@ but `401 PermissionDenied` ("Principal does not have access to API/Operation") o
 `/openai` path, because the MI cannot reach the Foundry backend.
 
 ```pwsh
-$apimMi  = az apim show -g rg-copilot-byok-gov-pilot -n <apimName> --query identity.principalId -o tsv
-$aoai    = az cognitiveservices account show -g rg-copilot-byok-gov-pilot -n <aoaiName>    --query id -o tsv
-$foundry = az cognitiveservices account show -g rg-copilot-byok-gov-pilot -n <foundryName> --query id -o tsv
+# $rg = your deployed RG: rg-copilot-byok-gov-pilot (Gov) or rg-copilot-byok-comm-pilot (Commercial).
+$rg = "rg-copilot-byok-<envName>"
+$apimMi  = az apim show -g $rg -n <apimName> --query identity.principalId -o tsv
+$aoai    = az cognitiveservices account show -g $rg -n <aoaiName>    --query id -o tsv
+$foundry = az cognitiveservices account show -g $rg -n <foundryName> --query id -o tsv
 az role assignment create --assignee-object-id $apimMi --assignee-principal-type ServicePrincipal `
   --role "Cognitive Services OpenAI User" --scope $aoai
 az role assignment create --assignee-object-id $apimMi --assignee-principal-type ServicePrincipal `
@@ -289,7 +291,18 @@ OpenAI **playground** (or calling the account with an SDK) hits an **expected** 
 > permissions. You will need the Cognitive Services OpenAI User role or higher.*
 
 That is the keys-off design, not a fault. Grant humans access one of two ways — both end in the
-`Cognitive Services OpenAI User` role on **each** account:
+`Cognitive Services OpenAI User` role on **each** account. The role grant itself is **identical
+in both clouds**; only the portal you open and the example UPN/RG suffix differ:
+
+| | **Government** (`AzureUSGovernment`) | **Commercial** (`AzureCloud`) |
+|---|---|---|
+| Playground portal | Azure AI Foundry / OpenAI portal at `*.azure.us` (e.g. `ai.azure.us`) | `ai.azure.com` / `oai.azure.com` |
+| Example UPN suffix | `user@contoso.onmicrosoft.us` | `user@contoso.onmicrosoft.com` |
+| Default RG name | `rg-copilot-byok-gov-pilot` (`envName=gov-pilot`) | `rg-copilot-byok-comm-pilot` (`envName=comm-pilot`) |
+| `az login` cloud | `az cloud set --name AzureUSGovernment` first | `az cloud set --name AzureCloud` (default) |
+
+> The RG name is `rg-copilot-byok-<envName>`, so it follows whichever parameters profile you
+> deployed. Set `$rg` below to match your environment.
 
 **Option A — IaC-managed (recommended, repeatable).** Add object IDs to the
 `playgroundPrincipalIds` param and redeploy. Each principal gets the role on both the AOAI and
@@ -302,34 +315,36 @@ Foundry accounts automatically. Works even when `assignAoaiRbac=false`. Prefer a
 ```
 
 ```pwsh
-# Look up object IDs
-az ad user show --id user@contoso.onmicrosoft.us --query id -o tsv      # a user
-az ad group show --group "AI Playground Users" --query id -o tsv         # a group
+# Look up object IDs (use the UPN suffix for your cloud):
+az ad user show --id user@contoso.onmicrosoft.us  --query id -o tsv     # Gov user (.us)
+az ad user show --id user@contoso.onmicrosoft.com --query id -o tsv     # Commercial user (.com)
+az ad group show --group "AI Playground Users" --query id -o tsv        # a group (cloud-agnostic)
 ```
 
 **Option B — manual (one-off, no redeploy).**
 
 ```pwsh
-$rg = "rg-copilot-byok-gov-pilot"
+# Set $rg to your deployed RG: rg-copilot-byok-gov-pilot (Gov) or rg-copilot-byok-comm-pilot (Commercial).
+$rg = "rg-copilot-byok-<envName>"
 $aoai    = az cognitiveservices account show -g $rg -n <aoaiName>    --query id -o tsv
 $foundry = az cognitiveservices account show -g $rg -n <foundryName> --query id -o tsv
-$who = "user@contoso.onmicrosoft.us"   # UPN or objectId
+$who = "user@contoso.onmicrosoft.us"   # Gov: .us  |  Commercial: .com  — UPN or objectId
 az role assignment create --assignee $who --role "Cognitive Services OpenAI User" --scope $aoai
 az role assignment create --assignee $who --role "Cognitive Services OpenAI User" --scope $foundry
 ```
 
 Use `Cognitive Services OpenAI Contributor` instead if they must also create/manage deployments.
 
-> **VNet caveat:** both accounts have `publicNetworkAccess=Disabled`, so the role is necessary
-> but not sufficient — the playground only works from **inside the VNet** (P2S VPN or the test
-> VM). A user on the public internet stays blocked even with the role.
+> **VNet caveat (both clouds):** both accounts have `publicNetworkAccess=Disabled`, so the role
+> is necessary but not sufficient — the playground only works from **inside the VNet** (P2S VPN
+> or the test VM). A user on the public internet stays blocked even with the role.
 
 ## 4. Configure the P2S VPN client
 
 After deployment:
 
 ```pwsh
-$rg = "rg-copilot-byok-gov-pilot"
+$rg = "rg-copilot-byok-<envName>"   # gov-pilot (Gov) or comm-pilot (Commercial)
 $gw = az network vnet-gateway list -g $rg --query "[0].name" -o tsv
 az network vnet-gateway vpn-client generate -g $rg -n $gw --processor-architecture Amd64 -o tsv
 ```
@@ -453,7 +468,7 @@ gateway was deployed with `authMode=jwt`; the `-AppId` is the app **client-ID GU
 > `testSubscriptionIds` lists them. Fetch a key with:
 >
 > ```pwsh
-> $rg   = 'rg-copilot-byok-gov-pilot'
+> $rg   = 'rg-copilot-byok-<envName>'   # gov-pilot (Gov) or comm-pilot (Commercial)
 > $apim = az deployment sub create ... # or: az apim list -g $rg --query "[0].name" -o tsv
 > az apim subscription show -g $rg --service-name $apim --sid dev1 `
 >   --query primaryKey -o tsv   # secondaryKey is the backup
@@ -468,6 +483,11 @@ gateway was deployed with `authMode=jwt`; the `-AppId` is the app **client-ID GU
 When `deployTestVm=true`, connect to the VM through the portal (**Connect → Bastion**),
 then on the VM:
 
+> **APIM host suffix differs by cloud.** The examples below use a Gov host
+> (`...azure-api.us`); on **Commercial** the gateway is `...azure-api.net`. Use whichever
+> matches your deployment (the `deployment outputs` / `azd env get-values` report the real
+> FQDN). The `/openai` suffix is appended automatically if you omit it.
+
 ```pwsh
 # Default (subscription key) — no Azure CLI / az login needed for this mode:
 $env:APIM_SUBSCRIPTION_KEY = '<your per-developer key>'
@@ -478,7 +498,7 @@ $env:APIM_SUBSCRIPTION_KEY = '<your per-developer key>'
 # Opt-in (jwt) — requires Azure CLI + login so a token can be minted:
 #   Invoke-WebRequest https://aka.ms/installazurecliwindows -OutFile $env:TEMP\azcli.msi
 #   Start-Process msiexec.exe -Wait -ArgumentList "/i `"$env:TEMP\azcli.msi`" /quiet"
-#   az cloud set --name AzureUSGovernment; az login --use-device-code
+#   az cloud set --name AzureUSGovernment; az login --use-device-code   # Gov (Commercial: az cloud set --name AzureCloud; az login)
 #   ./scripts/copilot-cli-byok.ps1 -AuthMode jwt -AppId <clientId-guid> `
 #                                  -ApimBaseUrl 'https://apim-...azure-api.us/openai' -Model gpt-5.1 -Test
 ```
@@ -584,6 +604,7 @@ modified-content-filter application** (the platform rejects an unapproved loosen
 ## Teardown
 
 ```pwsh
-az group delete -n rg-copilot-byok-gov-pilot --yes --no-wait
+# RG is rg-copilot-byok-<envName>: gov-pilot (Gov) or comm-pilot (Commercial).
+az group delete -n rg-copilot-byok-<envName> --yes --no-wait
 ./scripts/setup-entra.ps1 -DisplayName "copilot-byok-gateway" -Remove
 ```

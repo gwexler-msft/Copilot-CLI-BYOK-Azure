@@ -62,6 +62,29 @@ Key points the diagram encodes:
   [github-egress-allowlist.md](github-egress-allowlist.md). That is auth/licensing, not
   model traffic.
 
+## Why the classic APIM Developer SKU (the AI gateway is tier-agnostic)
+
+A frequent question is whether this should use the “APIM v2 AI gateway” instead. Two facts,
+both from Microsoft Learn, settle it:
+
+1. **The AI gateway is not a v2 feature — it applies to *all* API Management tiers.** The
+   [AI gateway capabilities](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities)
+   doc is headed *“APPLIES TO: All API Management tiers”* and states the AI gateway *“extends
+   API Management's existing API gateway; it's not a separate offering.”* The token-limit,
+   token-metric, content-safety, backend load-balancing, and semantic-caching policies all run
+   on the classic **Developer** SKU. This design already uses them — the policy applies the
+   official `azure-openai-token-limit` AI-cost guard and emits per-developer token metrics.
+2. **APIM v2 tiers are not available in Azure Government.** The
+   [v2 tiers region-availability](https://learn.microsoft.com/en-us/azure/api-management/api-management-region-availability)
+   table lists commercial regions only — no `USGov`/`USDoD` regions — so Gov runs on the
+   **classic** tiers (Consumption, Developer, Basic, Standard, Premium). The Developer SKU is
+   the right pilot choice there; production can scale to classic Standard/Premium.
+
+What genuinely *is* v2-only doesn't affect this scenario: the **Anthropic Messages API schema**
+(*“currently supported in API Management v2 tiers”*), some portal import wizards, and the
+**Foundry-embedded AI gateway (preview)**. Copilot CLI speaks the OpenAI Chat Completions /
+Responses schema, which the classic tiers support fully.
+
 The dev laptop has:
 
 1. A per-developer credential — an **APIM subscription key** (default) or a short-lived

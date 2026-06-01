@@ -17,6 +17,19 @@ BYOK with Azure"* (Parsons), reality-checked against shipping `gh copilot-cli` v
 | Access | Point-to-Site VPN gateway (OpenVPN protocol) so pilot devs can hit the private APIM from their laptops. |
 | Observability | Log Analytics workspace, Application Insights, ready-made KQL queries for tokens-per-dev and tokens-per-model. |
 
+> **About the “AI gateway” (common question).** Azure API Management's *AI gateway* is
+> **not a separate product or a v2-tier feature** — Microsoft documents it as applying to
+> **all API Management tiers** ([genai-gateway-capabilities](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities)).
+> It's just the set of GenAI policies (token limits, token-metric emission, content safety,
+> backend load balancing, semantic caching) layered on the normal API gateway. This project
+> **already uses it**: the policy applies the official `azure-openai-token-limit` AI-cost guard
+> plus per-developer token metrics. The **classic Developer SKU** is deliberate — the APIM
+> **v2 tiers (Basic/Standard/Premium v2) are not available in Azure Government** today
+> ([v2 region availability](https://learn.microsoft.com/en-us/azure/api-management/api-management-region-availability)),
+> so Gov uses the classic tiers, which support the same AI-gateway policies. The only v2-only
+> AI extras (the Anthropic Messages schema, some portal import wizards, the Foundry-embedded
+> gateway preview) aren't needed for an OpenAI-schema Copilot-CLI BYOK gateway.
+
 ## Two clouds, one template
 
 Cloud-specific values are parameterized:

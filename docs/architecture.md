@@ -30,8 +30,15 @@ flowchart LR
     subgraph VNet["Customer Azure VNet 10.60.0.0/16 (private)"]
         APIM["APIM — internal VNet mode<br/>authMode: subscriptionKey (default) | jwt<br/>validate creds, emit-metric, rate-limit,<br/>strip creds, inject MI token, route by model"]
         subgraph Backends["Model backends (Private Endpoints, publicNetwork=Off)"]
-            FOUNDRY["Microsoft Foundry<br/>kind=AIServices<br/>path /openai — DEFAULT"]
-            AOAI["Azure OpenAI<br/>kind=OpenAI<br/>path /aoai — OPTIONAL (legacy)"]
+            direction TB
+            subgraph FoundryGroup["Microsoft Foundry — default backend"]
+                FOUNDRY["Microsoft Foundry<br/>kind=AIServices<br/>path /openai — DEFAULT"]
+                FOUNDRY2["Microsoft Foundry — region 2..N<br/>same model + mini deployments<br/>OPT-IN (deployBackendPool=true)"]
+            end
+            subgraph AoaiGroup["Azure OpenAI (legacy) — opt-in"]
+                AOAI["Azure OpenAI (legacy)<br/>kind=OpenAI<br/>path /aoai — OPT-IN (deployAoai=true)"]
+                AOAI2["Azure OpenAI (legacy) — region 2..N<br/>same model deployments<br/>OPT-IN (deployBackendPool=true)"]
+            end
         end
         AI["App Insights / Log Analytics<br/>customMetrics (namespace copilot.byok)"]
     end
@@ -45,9 +52,26 @@ flowchart LR
     APIM -- "MI token (AAD)" --> ENTRA
     APIM -- "default route" --> FOUNDRY
     APIM -. "deployAoai=true and/or pinned-model override" .-> AOAI
+    APIM -. "deployBackendPool=true: pool balances / fails over" .-> FOUNDRY2
+    APIM -. "deployAoai+deployBackendPool=true: pool balances / fails over" .-> AOAI2
     APIM -- "emit-metric" --> AI
     APIM -. "authMode=jwt: validate-jwt vs openid-config" .-> ENTRA
+
+    %% invisible links to force Foundry group to render ABOVE the AOAI group
+    FOUNDRY ~~~ AOAI
+    FOUNDRY2 ~~~ AOAI2
+
+    classDef optin fill:#f5f5f5,stroke:#bbbbbb,stroke-dasharray:5 5,color:#888888;
+    class FOUNDRY2,AOAI,AOAI2 optin;
 ```
+
+> Greyed/dashed boxes are **opt-in** — nothing in the default deployment creates them. The
+> **region 2…N** Foundry box turns on with `deployBackendPool=true` (and a `foundryRegions` list);
+> the whole **Azure OpenAI** column (primary + its region 2…N) is off unless you set
+> `deployAoai=true` (legacy path), and its secondary region needs `deployBackendPool=true` as well.
+> When enabled, APIM fronts each backend's primary plus every regional account through a single
+> load-balanced **Pool** backend — see
+> [Multi-region backend pools (opt-in)](#multi-region-backend-pools-opt-in).
 
 Key points the diagram encodes:
 
@@ -473,13 +497,20 @@ What the opt-in does, end to end:
   auto-route requests work against any member. Private endpoints land in the primary VNet's PE
   subnet (cross-region PE is supported) and register in the shared private DNS zones.
 - **Backends + pool** — `infra/modules/apim-backends.bicep` creates one **Url backend** per
-  region plus a **Pool backend** (`foundry-pool` / `aoai-pool`) that load-balances them
-  (priority 1, weight 100 = round-robin). The `foundry-backend-id` named value flips from
-  `foundry` to `foundry-pool` automatically.
+  region plus a **Pool backend** (`foundry-pool` / `aoai-pool`). The `backendPoolStrategy` param
+  controls member distribution: `weighted` = **active/active** (every region priority 1, weight
+  100 → load-balanced round-robin); `priority` (default) = **active/passive** (primary priority 1,
+  secondaries priority 2+ → they serve only when higher tiers trip/are down). The
+  `foundry-backend-id` named value flips from `foundry` to `foundry-pool` automatically.
 - **Circuit breaker** — `enableBackendCircuitBreaker` (default on when pooling) trips a member
   out of rotation on **429 + 5xx** within `breakerInterval` and **honors `Retry-After`**, so a
   PTU 429 spills over to the next region promptly instead of failing the caller. Tune with
   `breakerFailureCount` / `breakerTripDuration`.
+- **In-request retry** — the policy `<backend>` wraps `<forward-request>` in a `<retry>` on
+  transient **429/5xx** (`count=2`, `first-fast-retry`). The circuit breaker isolates a bad
+  region *across* requests; this retry re-selects the next healthy pool member *within the same*
+  request so a single transient failure doesn't surface to the caller. It is a no-op for a single
+  Url backend, so it ships safely in every deployment.
 - **RBAC — the must-not-forget step** — because MI mints one token valid against all accounts,
   `infra/modules/rbac.bicep` grants the APIM MI **Cognitive Services OpenAI User** on *every*
   regional account. A member the MI lacks rights on returns 401/403 and silently poisons the
@@ -490,6 +521,77 @@ Two caveats this design accepts: the auto-route **Level-2 classifier** still cal
 not the pool — fine for a `max_tokens:1` probe; and the secondary regional accounts must host
 the same deployment names for routing to be uniform. With `deployBackendPool: false` (default)
 none of this is created and behavior is identical to a single transparent Url backend.
+
+#### Workflow 1 — load distribution (`backendPoolStrategy: weighted`, active/active)
+
+Every region has equal priority/weight, so APIM round-robins each request across all members.
+This spreads token throughput over multiple regional capacities (useful when one region's PTU /
+quota can't absorb the whole developer fleet). The managed-identity hop is unchanged — the same
+MI token is valid against every member.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Dev as Copilot CLI
+    participant APIM as APIM (foundry-pool, weighted)
+    participant R1 as Foundry — primary region
+    participant R2 as Foundry — region 2
+
+    Note over APIM: pool members equal weight → round-robin
+    Dev->>APIM: request #1
+    APIM->>R1: forward (MI token)
+    R1-->>Dev: 200
+    Dev->>APIM: request #2
+    APIM->>R2: forward (MI token)
+    R2-->>Dev: 200
+    Dev->>APIM: request #3
+    APIM->>R1: forward (MI token)
+    R1-->>Dev: 200
+    Note over APIM,R2: load spreads ~50/50 across regional capacities
+```
+
+> **Verifying the split.** App Insights stamps each dependency with the **gateway's** region
+> (constant), *not* the backend's — so don't judge distribution by the dependency "Region"
+> property. Use the backend **host** instead (`<acct>` = primary, `<acct>r1/r2…` = regional
+> members): [`monitoring/kql/requests-per-backend-region.kql`](../monitoring/kql/requests-per-backend-region.kql)
+> buckets requests by `parse_url(target).Host` to show the true per-region counts.
+
+#### Workflow 2 — resiliency / automatic failover
+
+Two independent mechanisms keep a failing region from reaching the caller:
+
+- **In-request retry** (every deployment, even single-region): the policy `<retry>` re-forwards a
+  transient **429/5xx** onto the next healthy pool member *within the same request*, so one
+  blip never surfaces.
+- **Circuit breaker** (default-on with the pool): after `breakerFailureCount` failures
+  (429 + 5xx) in `breakerInterval`, APIM **trips the member out of rotation** for
+  `breakerTripDuration` and honors any `Retry-After`. With `backendPoolStrategy: priority` the
+  secondary is **active/passive** — it serves *only* while the primary is tripped, then traffic
+  returns to the primary automatically when the breaker resets.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Dev as Copilot CLI
+    participant APIM as APIM (foundry-pool)
+    participant R1 as Foundry — primary
+    participant R2 as Foundry — secondary
+
+    Note over R1: primary hits capacity / 5xx
+    Dev->>APIM: request
+    APIM->>R1: forward (MI token)
+    R1-->>APIM: 429 / 5xx
+    APIM->>R2: in-request retry to next member
+    R2-->>Dev: 200 (caller never sees the failure)
+    Note over APIM,R1: breaker counts the failure - after threshold primary is tripped out for breakerTripDuration
+    Dev->>APIM: subsequent requests
+    APIM->>R2: routed to healthy secondary while primary is tripped
+    R2-->>Dev: 200
+    Note over APIM,R1: breaker resets - traffic returns to primary
+```
+
+With `backendPoolStrategy: priority` this is classic **active/passive DR**; with `weighted` it is
+**active/active** that simply drops the tripped member from the rotation until it recovers.
 
 ## Cloud parameterization
 

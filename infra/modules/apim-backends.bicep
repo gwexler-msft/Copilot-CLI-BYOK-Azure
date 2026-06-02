@@ -40,6 +40,13 @@ param breakerInterval string = 'PT1M'
 @description('Circuit breaker: how long the backend stays tripped once opened (ISO-8601 duration).')
 param breakerTripDuration string = 'PT1M'
 
+@description('Pool member distribution. priority = active/passive (primary serves all traffic; secondary regions only take over when the primary trips/opens its breaker). weighted = active/active, load-balanced equally across every region.')
+@allowed([
+  'priority'
+  'weighted'
+])
+param poolStrategy string = 'priority'
+
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
 }
@@ -87,9 +94,11 @@ resource foundryPool 'Microsoft.ApiManagement/service/backends@2024-06-01-previe
   properties: {
     type: 'Pool'
     pool: {
+      // weighted => every region priority 1 (load-balanced by weight). priority => primary-first
+      // failover tiers (primary=1, r1=2, r2=3, ...) so secondaries only serve when higher tiers are down.
       services: [for (url, i) in foundryBaseUrls: {
         id: foundryUrlBackends[i].id
-        priority: 1
+        priority: poolStrategy == 'weighted' ? 1 : min(i + 1, 100)
         weight: 100
       }]
     }
@@ -115,7 +124,7 @@ resource aoaiPool 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' 
     pool: {
       services: [for (url, i) in aoaiBaseUrls: {
         id: aoaiUrlBackends[i].id
-        priority: 1
+        priority: poolStrategy == 'weighted' ? 1 : min(i + 1, 100)
         weight: 100
       }]
     }

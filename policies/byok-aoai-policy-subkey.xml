@@ -170,7 +170,14 @@
   </inbound>
 
   <backend>
-    <base />
+    <!-- In-request failover. A pooled backend's circuit breaker isolates a region ACROSS
+         requests; this <retry> covers the SAME request: on a transient 429/5xx, re-run
+         <forward-request>, which re-selects the next healthy pool member (honoring priority
+         tiers / weights). No-op for a single Url backend, so it is safe in every deployment.
+         buffer-request-body keeps the body available for the resend. -->
+    <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500))" count="2" interval="0" first-fast-retry="true">
+      <forward-request buffer-request-body="true" />
+    </retry>
   </backend>
 
   <outbound>

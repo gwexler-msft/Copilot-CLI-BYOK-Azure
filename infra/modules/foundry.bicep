@@ -13,6 +13,9 @@ param location string
 @description('Disambiguator appended to the account name for secondary backend-pool regions. Empty = primary account (name unchanged).')
 param regionTag string = ''
 
+@description('Region for the private endpoint. A PE must be co-located with its subnet/VNet, so for secondary-region pool accounts this is the PRIMARY VNet region, not the account region. Defaults to the account location for the primary account.')
+param peLocation string = location
+
 @description('Public DNS suffix for the openai endpoint (e.g. openai.azure.com or openai.azure.us). Used to build the private base URL.')
 param openaiPublicSuffix string
 
@@ -113,7 +116,7 @@ resource miniDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-1
 // in 'Succeeded' state, avoiding the AccountProvisioningStateInvalid race on idempotent re-runs.
 resource pe 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: peName
-  location: location
+  location: peLocation
   properties: {
     subnet: { id: peSubnetId }
     privateLinkServiceConnections: [

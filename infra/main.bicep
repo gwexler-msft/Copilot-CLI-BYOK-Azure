@@ -255,6 +255,13 @@ param breakerInterval string = 'PT1M'
 @description('Circuit breaker: how long a tripped backend stays out of rotation before being retried (ISO-8601 duration).')
 param breakerTripDuration string = 'PT1M'
 
+@description('Backend-pool distribution strategy. priority = active/passive failover (primary region serves all traffic; other regions take over only on trip/outage). weighted = active/active, load-balanced equally across all regions. Only applies when deployBackendPool=true with >1 region.')
+@allowed([
+  'priority'
+  'weighted'
+])
+param backendPoolStrategy string = 'priority'
+
 var suffix = substring(uniqueString(subscription().id, envName, location), 0, 6)
 var rgName = 'rg-${namePrefix}-${envName}'
 
@@ -400,6 +407,7 @@ module foundryRegional 'modules/foundry.bicep' = [for (region, i) in foundryRegi
     suffix: suffix
     regionTag: 'r${i + 1}'
     location: region.location
+    peLocation: location
     openaiPublicSuffix: v.aoaiPublicSuffix
     openaiZoneId: privatedns.outputs.openaiZoneId
     cognitiveZoneId: privatedns.outputs.cognitiveZoneId
@@ -431,6 +439,7 @@ module aoaiRegional 'modules/aoai.bicep' = [for (region, i) in aoaiRegions: if (
     suffix: suffix
     regionTag: 'r${i + 1}'
     location: region.location
+    peLocation: location
     openaiPublicSuffix: v.aoaiPublicSuffix
     openaiZoneId: privatedns.outputs.openaiZoneId
     peSubnetId: network.outputs.peSubnetId
@@ -498,6 +507,7 @@ module apimBackends 'modules/apim-backends.bicep' = {
     breakerFailureCount: breakerFailureCount
     breakerInterval: breakerInterval
     breakerTripDuration: breakerTripDuration
+    poolStrategy: backendPoolStrategy
   }
 }
 
@@ -597,7 +607,10 @@ module apimSubscriptions 'modules/apim-subscriptions.bicep' = if (authMode == 's
   ]
 }
 
-module rbac 'modules/rbac.bicep' = if (assignAoaiRbac || !empty(playgroundPrincipalIds)) {
+// The APIM managed identity needs the OpenAI User role on EVERY backend account it calls.
+// Enabling the multi-region pool therefore forces MI RBAC on (primary + all regional members),
+// otherwise a regional member silently returns 401/403 and poisons the pool.
+module rbac 'modules/rbac.bicep' = if (assignAoaiRbac || deployBackendPool || !empty(playgroundPrincipalIds)) {
   name: 'rbac'
   scope: rg
   params: {
@@ -607,7 +620,7 @@ module rbac 'modules/rbac.bicep' = if (assignAoaiRbac || !empty(playgroundPrinci
     foundryAccountName: deployFoundry ? foundry.outputs.foundryAccountName : ''
     assignAoai: deployAoai
     assignFoundry: deployFoundry
-    assignApimMi: assignAoaiRbac
+    assignApimMi: assignAoaiRbac || deployBackendPool
     #disable-next-line BCP318 // regional outputs only present when those loops deployed
     additionalFoundryAccountNames: [for (region, i) in foundryRegions: foundryRegional[i].outputs.foundryAccountName]
     #disable-next-line BCP318

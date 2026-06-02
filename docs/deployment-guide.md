@@ -459,6 +459,72 @@ forgiving. The only hard-destructive operation is **Teardown** below, and the on
 require a replace are SKU/version/immutable edits, which the blue/green pattern stages without
 downtime.
 
+### (Optional) Enable multi-region backend pools
+
+By default the gateway fronts a **single** AI account (`deployBackendPool=false`). To load-balance
+and/or fail over across **multiple regions**, opt in with three parameter changes — no policy or
+code edits. See the architecture doc's
+[Multi-region backend pools](architecture.md#multi-region-backend-pools-opt-in) for the
+distribution and resiliency workflows this enables.
+
+**1. Edit `infra/main.parameters.json`:**
+
+```jsonc
+"deployBackendPool":  { "value": true },
+// "weighted" = active/active load-balancing across all regions;
+// "priority" = active/passive failover (primary serves all; secondaries take over on a breaker trip).
+"backendPoolStrategy": { "value": "weighted" },
+// One entry per EXTRA region. Each adds a Foundry account there with the SAME model + mini
+// deployment names as the primary. The example values are pre-filled in the *.example.json
+// files under "_example_foundryRegions" — copy them here. location MUST host your model + SKU.
+"foundryRegions": { "value": [ { "location": "usgovarizona", "modelCapacity": 50, "miniModelCapacity": 50 } ] }
+// If you run the legacy AOAI backend too, mirror it with: "aoaiRegions": { "value": [ { "location": "...", "modelCapacity": 50 } ] }
+```
+
+> **Capacity check first.** Confirm the target region hosts your model + SKU and you have quota:
+> `az cognitiveservices model list --location <region>` and
+> `az cognitiveservices account list-skus`. In Gov, `GlobalStandard` is unavailable — use
+> `DataZoneStandard` (the example files already do).
+
+**2. Provision** (preview, then apply):
+
+```pwsh
+azd provision --preview     # confirms the new regional account(s), PE(s), pool backend, and RBAC are planned
+azd provision
+```
+
+What the deploy creates/changes automatically:
+
+- a Foundry (and/or AOAI) account **per extra region**, each with the same model + mini deployments;
+- a **Private Endpoint** for each, placed in the **primary VNet's** PE subnet (cross-region PE is
+  supported — the PE is co-located with the VNet, not the account);
+- one APIM **Url backend** per region plus a **Pool** backend (`foundry-pool` / `aoai-pool`) with a
+  default-on **circuit breaker** (429 + 5xx); the `foundry-backend-id` named value flips to the pool;
+- **RBAC** — the APIM managed identity is granted `Cognitive Services OpenAI User` on **every**
+  regional account automatically (enabling the pool forces the RBAC module on, even when
+  `assignAoaiRbac=false`). This is the must-not-forget step: a member the MI can't call returns
+  401/403 and poisons the pool.
+
+> **`az deployment sub create` path:** the same three params work, but because the raw `az`
+> path does **not** run the postprovision hook, and pool RBAC is wired into the template's RBAC
+> module (forced on by `deployBackendPool=true`), the regional grants are applied in-line during
+> the deployment — no extra `grant-apim-mi-rbac` run is needed for the regional members.
+
+**3. Verify the live split** once traffic flows:
+
+```pwsh
+# In App Insights Logs (or Log Analytics), run:
+#   monitoring/kql/requests-per-backend-region.kql
+# It buckets requests by backend HOST (<acct> = primary, <acct>r1/r2... = regional members).
+# Do NOT use the dependency "Region" property — that is the APIM gateway region (constant),
+# not the backend that served the request.
+```
+
+**To turn it back off:** set `deployBackendPool=false` and empty `foundryRegions`/`aoaiRegions`,
+then re-provision. Because ARM is **incremental**, this repoints the gateway to the single primary
+backend but does **not** delete the regional accounts/PEs — remove those manually (see
+[Teardown](#teardown)) to stop their cost.
+
 ## 4. Configure the P2S VPN client
 
 After deployment:

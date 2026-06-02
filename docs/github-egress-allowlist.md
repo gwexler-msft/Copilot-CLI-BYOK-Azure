@@ -15,6 +15,48 @@
 > below are kept for environments that want install-time reachability or that run the CLI in
 > non-BYOK mode.
 
+## Why not `COPILOT_OFFLINE`? (enforce privacy at the network, not the app)
+
+A tempting shortcut to "stop the CLI from talking to GitHub" is an app-level offline switch.
+The CLI historically honored an **undocumented `COPILOT_OFFLINE`** env var (it is **not** in
+the public GitHub Copilot CLI docs), and this repo's wrapper scripts briefly set it. **We
+removed it** — it is the wrong lever, and it actively breaks BYOK.
+
+`COPILOT_OFFLINE` is a **blunt, process-wide kill switch for *all* outbound HTTP**. It is not
+selective: it cannot tell your **private model endpoint** apart from GitHub's SaaS phone-home,
+so it blocks both — including the **auth/token path** the CLI still runs to mint the credential
+it presents to the gateway.
+
+**Symptom when it was on: `HTTP 403` against the private APIM, not a timeout.** A 403
+(`Forbidden`) rather than a connection error is the tell — the request *did* leave the box but
+arrived **without a valid credential**, because offline mode suppressed the identity/token
+acquisition. APIM's `validate-jwt` / subscription-key check then rejected the unauthenticated
+call. So offline mode doesn't just block GitHub chatter; it breaks the one path BYOK depends on.
+
+The correct control is **network-layer egress filtering**, which *is* selective: it keeps the
+private APIM / model / AAD / ARM paths open while denying GitHub SaaS. That is exactly the
+`deployNatGateway` + `restrictVmEgress` allowlist below (and the desired-end-state Azure
+Firewall FQDN rules). It is strictly better than an app-level flag because it is
+**allow-list-driven rather than all-or-nothing**.
+
+```mermaid
+flowchart LR
+    subgraph App["App-level COPILOT_OFFLINE (removed — wrong lever)"]
+        O["Blocks ALL HTTP<br/>incl. your private endpoint<br/>+ the auth/token path"] --> O403["HTTP 403<br/>BYOK broken"]
+    end
+    subgraph Net["Network-level egress control (chosen)"]
+        N["NSG deny-all + allowlist<br/>(end-state: Azure Firewall FQDN rules)"]
+        N --> Allow["ALLOW: private APIM,<br/>Entra (AAD), ARM"]
+        N --> Deny["DENY: github.com<br/>SaaS phone-home"]
+        Allow --> Works["BYOK works,<br/>GitHub egress blocked"]
+    end
+```
+
+> Empirically (Gov test VM, 2026-06-01): with GitHub egress **denied at the NSG** but the
+> private paths allowed, `copilot -p "..."` ran end-to-end (exit 0, real token usage). The
+> CLI's GitHub phone-home is best-effort, not a hard dependency for inference — so you get the
+> privacy guarantee *without* sacrificing the model path that `COPILOT_OFFLINE` would have killed.
+
 ## What this repo now implements (opt-in, test-VM subnet)
 
 NSG rules are **IP / service-tag based and cannot match FQDNs**. There is no Azure service

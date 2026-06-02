@@ -47,7 +47,7 @@ flowchart LR
 
     CLI -- "default: api-key header to private APIM" --> APIM
     CLI -. "config-only: unset COPILOT_PROVIDER_* (off by default)" .-> SAAS
-    CLI -- "GitHub entitlement (public, allow-listed)" --> ENT
+    CLI -. "GitHub entitlement — best-effort phone-home, NOT required (deniable)" .-> ENT
 
     APIM -- "MI token (AAD)" --> ENTRA
     APIM -- "default route" --> FOUNDRY
@@ -62,7 +62,7 @@ flowchart LR
     FOUNDRY2 ~~~ AOAI2
 
     classDef optin fill:#f5f5f5,stroke:#bbbbbb,stroke-dasharray:5 5,color:#888888;
-    class FOUNDRY2,AOAI,AOAI2 optin;
+    class FOUNDRY2,AOAI,AOAI2,SAAS,ENT optin;
 ```
 
 > Greyed/dashed boxes are **opt-in** — nothing in the default deployment creates them. The
@@ -82,9 +82,12 @@ Key points the diagram encodes:
 - **The GitHub-SaaS model path is off by default** — it is only used if the developer
   does *not* set the `COPILOT_PROVIDER_*` env vars. The BYOK wrapper sets them, pointing
   the CLI at the private APIM gateway.
-- **GitHub entitlement traffic stays public** (allow-listed) — see
-  [github-egress-allowlist.md](github-egress-allowlist.md). That is auth/licensing, not
-  model traffic.
+- **GitHub entitlement traffic is best-effort, not required** — empirically (Gov test VM,
+  2026-06-01) the CLI runs BYOK end-to-end with **no GitHub login, no Copilot subscription,
+  and `api.github.com` egress denied**. The `api.github.com` phone-home is attempted by
+  default but is not a hard dependency, so a fully-private deployment denies it at the
+  network layer. See [github-egress-allowlist.md](github-egress-allowlist.md). Either way it
+  is auth/licensing, not model traffic.
 
 ## Why the classic APIM Developer SKU (the AI gateway is tier-agnostic)
 

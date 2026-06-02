@@ -593,6 +593,31 @@ sequenceDiagram
 With `backendPoolStrategy: priority` this is classic **active/passive DR**; with `weighted` it is
 **active/active** that simply drops the tripped member from the rotation until it recovers.
 
+#### Does splitting a conversation across regions break consistency?
+
+No — and it's worth understanding *why*, because it's a common worry. Chat completions are
+**stateless**: the model holds no server-side memory between calls, and the client (Copilot CLI)
+resends the **entire conversation** in the `messages` array on every turn. So if turn 1 lands in
+region A and turn 2 lands in region B, turn 2's request already carries turn 1's question *and*
+answer — region B reconstructs the full context from scratch, exactly as region A would have.
+There is nothing per-region to "share."
+
+| Factor | Shared across regions? | Why it's fine |
+| --- | --- | --- |
+| Conversation history | Yes — lives in the **client**, resent each turn | the stateless contract guarantees it |
+| Model weights / version | Yes — same model + pinned version in every region | identical deployments |
+| System prompt / sampling params | Yes — set by the caller per request | caller-controlled |
+| KV-cache / attention state | No — per-request, never persisted | rebuilt from `messages` every call |
+
+The only thing that could make regions *diverge* is a **model-version skew** — which is exactly
+why every regional account must host the **same model, version, and deployment names** as the
+primary (the example parameter files and the pool routing both depend on this). Output wording can
+still vary run-to-run because sampling is non-deterministic (`temperature > 0`), but that is
+inherent to the model, not caused by multi-region — pin `temperature: 0` + a fixed `seed` if you
+need reproducibility. This design uses plain stateless completions only; it does **not** rely on
+any server-side stateful feature (e.g. Assistants/`responses` threads or region-pinned prompt
+caching), so traffic is safe to spread across regions.
+
 ## Cloud parameterization
 
 The template runs in **both** Azure commercial (`AzureCloud`) and Azure Government

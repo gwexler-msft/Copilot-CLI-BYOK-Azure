@@ -47,9 +47,8 @@ of these once per machine — the versions are the floors this repo is validated
 | **PowerShell 7+ (`pwsh`)** | 7.4+ | Runs `scripts/setup-entra.ps1` and the probe/wrapper scripts. (bash equivalents exist under `scripts/*.sh`.) | `winget upgrade Microsoft.PowerShell` |
 | **GitHub Copilot CLI** | latest | The BYOK client you point at the gateway (Step 7). | `npm i -g @github/copilot` |
 
-> Verify in one shot: `azd version; az version; az bicep version; pwsh -v`. If `azd version`
-> prints an older build than 1.25.4, run the upgrade — a fresh terminal is needed after
-> `winget upgrade` so `PATH` resolves the new binary.
+> Verify in one shot: `azd version; az version; az bicep version; pwsh -v`
+>If `azd version` prints an older build than 1.25.4, run the upgrade — a fresh terminal is needed after `winget upgrade` so `PATH` resolves the new binary.
 
 ### Required permissions
 
@@ -111,7 +110,7 @@ az account set --subscription "<your gov sub id>"
 
 ## 1. Create the Entra app registration
 
-This is **outside Bicep** because it lives in Microsoft Graph, not ARM.
+This is **outside Bicep** because it lives in Microsoft Graph, not ARM. Navigate to the 'Copilot-CLI-BYOK' folder if not already there and run the following script:
 
 ```pwsh
 ./scripts/setup-entra.ps1 -DisplayName "copilot-byok-gateway" -ScopeName "cli.invoke"
@@ -134,7 +133,7 @@ Copy-Item infra/main.parameters.gov.example.json infra/main.parameters.json
 
 # Commercial: start from the AzureCloud profile instead
 #   (cloudEnv=AzureCloud, a commercial region, modelDeploymentSku=GlobalStandard already set):
-# Copy-Item infra/main.parameters.commercial.example.json infra/main.parameters.json
+Copy-Item infra/main.parameters.commercial.example.json infra/main.parameters.json
 ```
 
 Edit `infra/main.parameters.json` and replace the `<PLACEHOLDER>` values —
@@ -171,7 +170,7 @@ source control. For Commercial, also confirm your `location` hosts the model + S
 az bicep build --file infra/main.bicep
 ```
 
-If it builds clean, preview the plan. With `azd` (primary path) this is `azd provision
+If it builds clean, preview the plan. As a note, no output = clean build. This command only prints anything when there are warnings or errors. With `azd` (primary path) this is `azd provision
 --preview` (run it after the `azd` env is set up in Step 3); to preview without `azd`,
 run a what-if at subscription scope:
 

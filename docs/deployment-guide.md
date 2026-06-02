@@ -476,6 +476,27 @@ Download the returned URL, install the OpenVPN profile in `AzureVPN/`.
 The CLI is a developer-side client (laptop or the in-VNet test VM) — it is **not** part of
 the Azure deployment. Install it wherever you will run `copilot`.
 
+### Required runtime dependencies (reference)
+
+Everything the BYOK client needs at runtime, with the gotchas that bite in a private VNet.
+The **install** prerequisites (PowerShell / Node / CLI) are expanded in the table below this
+one; the **config** rows are what the wrapper sets for you in Step 6.
+
+| Dependency | Required? | Notes & gotchas |
+|---|---|---|
+| **Node.js 22+** | Yes (runtime) | Runtime for the `copilot` binary regardless of install method. Stock Windows Server has none — install first. The `winget GitHub.Copilot` build is self-contained but still needs Node present. |
+| **PowerShell 7+** | Recommended | The wrapper runs on stock PS 5.1 (warns + offers to install PS7), but `copilot` wants PS 6+. Env vars propagate **parent → child only**, so the wrapper drops you into a PS7 child shell that inherits the config. |
+| **`@github/copilot` CLI ≥ 1.0.54** | Yes | Pin a recent build for BYOK + auto-routing fixes. Any **≥ 1.0.20** speaks the versionless `/v1` route the gateway expects. `npm i -g @github/copilot@latest` or `winget install GitHub.Copilot`. |
+| **`COPILOT_PROVIDER_BASE_URL`** | Yes (config) | Must point at the gateway's **`/openai`** route (Foundry). Wrapper appends `/openai` if omitted. Host suffix differs by cloud: `.azure-api.us` (Gov) vs `.azure-api.net` (Commercial). |
+| **`COPILOT_PROVIDER_TYPE=azure`** | Yes (config) | Selects the Azure provider contract. Set by the wrapper. |
+| **`COPILOT_PROVIDER_API_KEY`** | Yes (config) | Carries the per-developer **APIM subscription key** (default `subscriptionKey` mode) **or** an Entra **JWT** (jwt mode). **Gotcha:** the key rides in the **`api-key` header**, not `Authorization` — designed around CLI bug #3399. Never write it to disk. |
+| **`COPILOT_MODEL`** | Yes (config) | Defaults to **`auto`** (gateway routes between full + mini tiers). A non-catalog name like `auto` triggers an informational *"not in built-in catalog"* warning → wrapper exports the token-limit vars below. |
+| **`COPILOT_PROVIDER_MAX_PROMPT_TOKENS` / `..._MAX_OUTPUT_TOKENS`** | Only for non-catalog models | Wrapper sets `272000` / `32768` (the smaller cap of each tier `auto` can pick) so a request can't overflow whichever tier it lands on. A named catalog model (e.g. `gpt-5.1`) leaves these unset. |
+| **Private DNS / hosts entry for APIM** | Yes (in-VNet) | APIM is Internal-VNet (private IP, e.g. `10.60.1.4`). The CLI can't do `curl --resolve`, so on the test VM add a `hosts` entry `<privateIp> <apim>.azure-api.us`, or pass `-ApimPrivateIp` to the wrapper (it uses `--resolve` for the smoke test). |
+| **Network path to APIM** | Yes | Reach the private gateway via **Bastion** (in-VNet test VM) or **P2S VPN** (laptop). No public APIM endpoint exists. |
+| **GitHub login / `github.com` egress** | **No (BYOK)** | Empirically verified unnecessary for the BYOK runtime — see the note at the end of this section. Only needed for non-BYOK (GHCP-hosted) models or install-time npm/node CDN reachability. |
+| **`*.openai.azure.*` egress from the client** | **No** | The laptop/VM never talks to AOAI/Foundry directly — only to APIM. Model traffic stays inside the VNet behind the gateway. |
+
 **Prerequisites (install in this order on the test VM):**
 
 | Component | Version | Why | Install (Windows) |
@@ -551,10 +572,13 @@ copilot --version
 > auto-routing fixes. On the in-VNet test VM, install Node 22+ first (e.g.
 > `winget install OpenJS.NodeJS.LTS`) since it ships without it.
 
-> **GitHub sign-in still required.** Even in BYOK mode the CLI runs `/login` once to verify
-> your GitHub Copilot entitlement; only the **model traffic** is redirected to the private
-> gateway via `COPILOT_PROVIDER_*`. In a fully air-gapped VNet, sign in before locking down
-> egress, or use a `COPILOT_GITHUB_TOKEN` PAT with the *Copilot Requests* permission.
+> **GitHub sign-in is NOT required for BYOK** *(empirically verified — Gov test VM, 2026-06-01)*.
+> A clean-room VM with no `.copilot` config, no `GH_TOKEN`/`GITHUB_TOKEN`, and no `copilot login`
+> ran a BYOK prompt end-to-end (exit 0, real token usage through the private APIM → Foundry) with
+> **only** the four `COPILOT_PROVIDER_*` vars set. `login` is an *optional* CLI command (for
+> GHCP-hosted models only); the dedicated `providers` help topic documents the BYOK path. So a
+> fully-private runtime can run with `github.com` egress **denied** — see
+> [github-egress-allowlist.md](github-egress-allowlist.md).
 
 ## 6. First developer test
 
@@ -594,8 +618,9 @@ gateway was deployed with `authMode=jwt`; the `-AppId` is the app **client-ID GU
 >   --query primaryKey -o tsv   # secondaryKey is the backup
 > ```
 >
-> Each `dev1`/`dev2` key is valid for **both** `/openai` (Foundry) and `/aoai` (AOAI),
-> and shows up as that name in telemetry (`developer_upn`). Treat them as shared pilot
+> Each `dev1`/`dev2` key is valid for the `/openai` (Foundry) path — and also `/aoai`
+> when the legacy AOAI backend is enabled (`deployAoai=true`, **off by default**) — and
+> shows up as that name in telemetry (`developer_upn`). Treat them as shared pilot
 > test credentials; provision per-person subscriptions for real developers.
 
 ### Option A — in-VNet test VM via Bastion (no VPN required)

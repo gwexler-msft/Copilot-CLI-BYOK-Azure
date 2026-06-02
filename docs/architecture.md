@@ -290,8 +290,8 @@ time (Bicep params); the third is a pure developer-side config decision.
 
 | Choice | Controlled by | Default | Notes |
 |---|---|---|---|
-| **Microsoft Foundry** (kind=AIServices) | `deployFoundry` (Bicep) | **`true` (default backend)** | Exposed at APIM path `/openai`. This is what new traffic hits. |
-| **Azure OpenAI** (kind=OpenAI, legacy) | `deployAoai` (Bicep) | `true` | Exposed at APIM path `/aoai`. Optional — can run alongside Foundry, instead of it, or not at all. |
+| **Microsoft Foundry** (kind=AIServices) | `deployFoundry` (Bicep) | **`true` (default backend)** | Exposed at APIM path `/openai`. This is what new traffic hits and the recommended/standard backend. |
+| **Azure OpenAI** (kind=OpenAI, legacy) | `deployAoai` (Bicep) | **`false` (opt-in)** | Exposed at APIM path `/aoai`. Disabled by default — only enable for a legacy `/aoai` path. Can run alongside Foundry or instead of it. |
 | **GitHub SaaS model** | `COPILOT_PROVIDER_*` env vars (developer config) | **not used** | Only used if the developer does *not* point the CLI at the private gateway. |
 
 ### Decision flow
@@ -312,8 +312,9 @@ flowchart TD
 - **`aoaiPinnedModels`** (comma-separated, case-insensitive) lets specific model names be
   rerouted from Foundry to the classic AOAI backend *in policy*, without the caller
   changing URLs. This is on top of the separate legacy `/aoai` path.
-- **Foundry-only or AOAI-only** are both valid: set `deployAoai=false` to run Foundry
-  alone, or `deployFoundry=false` to run only the legacy AOAI backend.
+- **Foundry-only is the default**, and both single-backend modes are valid: `deployAoai`
+  defaults to `false` so Foundry runs alone; set `deployAoai=true` to add the legacy AOAI
+  backend, or `deployFoundry=false` to run only the legacy AOAI backend.
 - **Foundry uses the OpenAI-compatible surface**, so its MI audience and role are
   identical to classic AOAI (`Cognitive Services OpenAI User` on
   `cognitiveservices.azure.*`). The native Foundry surface (`ai.azure.*`) is not used.

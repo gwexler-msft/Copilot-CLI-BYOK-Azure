@@ -52,8 +52,8 @@ param modelCapacity int = 50
 @description('Name of the Copilot deployment exposed via APIM (matches what devs put in COPILOT_MODEL).')
 param apimExposedModelName string = 'gpt-4.1'
 
-@description('Deploy the classic Azure OpenAI (kind=OpenAI) backend. Exposed via the APIM legacy path /aoai.')
-param deployAoai bool = true
+@description('Deploy the classic Azure OpenAI (kind=OpenAI) backend. Exposed via the APIM legacy path /aoai. Default false — Microsoft Foundry (kind=AIServices) is the recommended/standard backend; only enable this for a legacy /aoai path.')
+param deployAoai bool = false
 
 @description('Deploy the Microsoft Foundry (kind=AIServices) backend. The default APIM path /openai routes here.')
 param deployFoundry bool = true

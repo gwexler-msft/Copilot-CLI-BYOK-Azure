@@ -16,7 +16,7 @@
     "modelDeploymentSku": { "value": "DataZoneStandard" },
     "modelCapacity":      { "value": 50 },
     "apimExposedModelName": { "value": "gpt-5.1" },
-    "deployAoai":         { "value": true },
+    "deployAoai":         { "value": false },
     "deployFoundry":      { "value": true },
     "foundryModelName":   { "value": "gpt-5.1" },
     "foundryModelVersion": { "value": "2025-11-13" },

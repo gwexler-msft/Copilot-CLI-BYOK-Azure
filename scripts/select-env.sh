@@ -43,7 +43,7 @@ if [[ -z "$PROFILE" ]]; then
 fi
 
 case "$PROFILE" in
-  gov)        EXAMPLE="main.parameters.example.json";            CLOUD_NAME="AzureUSGovernment" ;;
+  gov)        EXAMPLE="main.parameters.gov.example.json";        CLOUD_NAME="AzureUSGovernment" ;;
   commercial) EXAMPLE="main.parameters.commercial.example.json"; CLOUD_NAME="AzureCloud" ;;
 esac
 

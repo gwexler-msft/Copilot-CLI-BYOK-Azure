@@ -11,14 +11,17 @@ whatif*.json
 
 # Bicep build artifacts
 infra/**/*.json
-!infra/main.parameters.example.json
+!infra/main.parameters.gov.example.json
 !infra/main.parameters.commercial.example.json
 
 # Real deployment parameters carry tenant/app-specific values — keep local only.
-# Copy infra/main.parameters.example.json -> infra/main.parameters.json and fill in.
+# Copy infra/main.parameters.gov.example.json -> infra/main.parameters.json and fill in.
 infra/main.parameters.json
 
 # OS / editor
 Thumbs.db
 .DS_Store
 .vscode/
+
+# Scratch / ad-hoc probe scripts (dot-prefixed, local only)
+scripts/.probe-*.ps1

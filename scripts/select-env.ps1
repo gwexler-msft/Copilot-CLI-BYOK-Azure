@@ -69,7 +69,7 @@ if (-not $Profile) {
 }
 
 $profileMap = @{
-  gov        = @{ Example = 'main.parameters.example.json';            Cloud = 'AzureUSGovernment' }
+  gov        = @{ Example = 'main.parameters.gov.example.json';        Cloud = 'AzureUSGovernment' }
   commercial = @{ Example = 'main.parameters.commercial.example.json'; Cloud = 'AzureCloud' }
 }
 $exampleFile = Join-Path $infraDir $profileMap[$Profile].Example

@@ -20,7 +20,7 @@ changes** between them; everything is driven by the `cloudEnv` param (see
 | **Use case** | Sovereign / regulated workloads (DoD, federal, CJIS, ITAR) that must stay in Azure Government. The pilot's default. | Standard enterprise tenants, dev/test, or any workload without a sovereign-cloud mandate. |
 | **Account** | `*.onmicrosoft.us` identity in a Gov tenant | `*.onmicrosoft.com` identity in a commercial tenant |
 | **Sign-in** | `az cloud set --name AzureUSGovernment` then `az login --use-device-code` | `az cloud set --name AzureCloud` then `az login` |
-| **Parameters profile** | `infra/main.parameters.example.json` | `infra/main.parameters.commercial.example.json` |
+| **Parameters profile** | `infra/main.parameters.gov.example.json` | `infra/main.parameters.commercial.example.json` |
 | **`cloudEnv`** | `AzureUSGovernment` | `AzureCloud` |
 | **Typical region** | `usgovvirginia` | a commercial region (e.g. `eastus2`) that hosts your model |
 | **Model SKU** | `DataZoneStandard` (`GlobalStandard` is N/A in usgovvirginia) | `GlobalStandard` |
@@ -130,7 +130,7 @@ then fill in these values:
 
 ```pwsh
 # Government (default pilot):
-Copy-Item infra/main.parameters.example.json infra/main.parameters.json
+Copy-Item infra/main.parameters.gov.example.json infra/main.parameters.json
 
 # Commercial: start from the AzureCloud profile instead
 #   (cloudEnv=AzureCloud, a commercial region, modelDeploymentSku=GlobalStandard already set):

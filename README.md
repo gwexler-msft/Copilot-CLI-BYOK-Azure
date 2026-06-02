@@ -44,7 +44,7 @@ Cloud-specific values are parameterized:
 First pilot targets **`usgovvirginia`** in your Azure Government tenant.
 
 To deploy, copy the parameters profile that matches your cloud and fill in the
-`<PLACEHOLDER>` values: `infra/main.parameters.example.json` (Government, the default) or
+`<PLACEHOLDER>` values: `infra/main.parameters.gov.example.json` (Government, the default) or
 `infra/main.parameters.commercial.example.json` (Commercial). See
 [docs/architecture.md](docs/architecture.md#cloud-parameterization) for the full endpoint
 matrix and the Commercial-only `services.ai` private-DNS-zone caveat.

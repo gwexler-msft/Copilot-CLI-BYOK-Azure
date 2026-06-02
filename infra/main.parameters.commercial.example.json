@@ -47,6 +47,8 @@
     "playgroundPrincipalIds": { "value": [] },
     "playgroundPrincipalType": { "value": "User" },
     "deployTestVm":       { "value": true },
+    "deployNatGateway":   { "value": false },
+    "restrictVmEgress":   { "value": false },
     "testVmAdminUsername": { "value": "byokadmin" },
     "deployApimPrivateDns": { "value": true }
   }

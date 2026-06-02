@@ -217,6 +217,12 @@ param testVmAdminUsername string = 'byokadmin'
 @secure()
 param testVmAdminPassword string = ''
 
+@description('Deploy a NAT Gateway on the test-VM subnet for deterministic, controlled egress (replaces the deprecated Azure default-outbound). Only applies when deployTestVm=true. ~$32/mo + data.')
+param deployNatGateway bool = false
+
+@description('Apply an egress-allowlist NSG to the test-VM subnet (GitHub/npm/nodejs/Azure-management only; deny the rest). A discovery tool to observe exactly what the Copilot CLI install/runtime needs. Only applies when deployTestVm=true. Pair with deployNatGateway so allowed traffic has an egress path.')
+param restrictVmEgress bool = false
+
 @description('Deploy a VNet-linked Private DNS zone (azure-api.us/.net) with an A record for the APIM gateway so in-VNet clients resolve it without a hosts entry. Prerequisite for the VPN/DNS-resolver phase too.')
 param deployApimPrivateDns bool = true
 
@@ -279,6 +285,8 @@ module network 'modules/network.bicep' = {
     vpnRootCertPublicData: vpnRootCertPublicData
     peerVnetResourceId: peerVnetResourceId
     deployTestVm: deployTestVm
+    deployNatGateway: deployNatGateway
+    restrictVmEgress: restrictVmEgress
   }
 }
 

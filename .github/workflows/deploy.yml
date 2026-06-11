@@ -1,0 +1,142 @@
+name: deploy
+
+# Manual-trigger CI/CD for the Copilot CLI BYOK → private Azure OpenAI/Foundry gateway.
+# Authenticates with OIDC federated credentials (no stored secrets), validates the Bicep with
+# a what-if preview, then deploys via `azd provision` behind a GitHub Environment approval gate.
+# See docs/deployment-guide.md → "CI/CD (GitHub Actions, manual trigger)" for setup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: Target Azure cloud
+        type: choice
+        required: true
+        default: AzureUSGovernment
+        options:
+          - AzureUSGovernment
+          - AzureCloud
+      action:
+        description: validate (what-if only) or deploy (provision)
+        type: choice
+        required: true
+        default: validate
+        options:
+          - validate
+          - deploy
+
+# OIDC: the workflow requests a federated token; nothing secret is stored in the repo.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # One deploy per cloud at a time; never cancel an in-flight provision.
+  group: deploy-${{ inputs.cloud }}
+  cancel-in-progress: false
+
+env:
+  # Non-secret routing derived from the selected cloud. Secrets/tenant values come from
+  # GitHub Environments (vars/secrets) and are read per-job below.
+  AZURE_ENV_NAME: ${{ inputs.cloud == 'AzureUSGovernment' && 'gov-pilot' || 'comm-pilot' }}
+  CI_PARAMS_FILE: ${{ inputs.cloud == 'AzureUSGovernment' && 'infra/main.parameters.ci.gov.json' || 'infra/main.parameters.ci.commercial.json' }}
+  GITHUB_ENVIRONMENT: ${{ inputs.cloud == 'AzureUSGovernment' && 'gov-pilot' || 'comm-pilot' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # validate — always runs. Builds/lints Bicep and runs an azd what-if preview.
+  # No resources are created here.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate (build + what-if)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.cloud == 'AzureUSGovernment' && 'gov-pilot' || 'comm-pilot' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install azd
+        uses: Azure/setup-azd@v2
+
+      - name: Install Bicep CLI
+        run: az bicep install
+
+      - name: Lint / build Bicep
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      - name: Select cloud (azd) + stage CI parameters
+        run: |
+          azd config set cloud.name "${{ inputs.cloud }}"
+          cp "${CI_PARAMS_FILE}" infra/main.parameters.json
+
+      - name: azd auth login (OIDC federated)
+        run: |
+          azd auth login \
+            --client-id "${{ vars.AZURE_CLIENT_ID }}" \
+            --tenant-id "${{ vars.AZURE_TENANT_ID }}" \
+            --federated-credential-provider github
+
+      - name: Azure CLI login (OIDC) — used by azd pre/post hooks
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          environment: ${{ inputs.cloud == 'AzureUSGovernment' && 'AzureUSGovernment' || 'AzureCloud' }}
+
+      - name: What-if preview (no changes applied)
+        run: azd provision --preview --no-prompt
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          # Injected into the CI params file via azd ${...} substitution.
+          APIM_PUBLISHER_EMAIL: ${{ vars.APIM_PUBLISHER_EMAIL }}
+          ENTRA_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          API_APP_ID_URI: ${{ vars.API_APP_ID_URI }}
+          API_AUDIENCE: ${{ vars.API_AUDIENCE }}
+
+  # ---------------------------------------------------------------------------
+  # deploy — only when action=deploy. Gated by the GitHub Environment's required
+  # reviewers (configure in repo Settings → Environments), giving an audit trail.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy (azd provision)
+    needs: validate
+    if: ${{ inputs.action == 'deploy' }}
+    runs-on: ubuntu-latest
+    # Approval gate: add required reviewers to this Environment to force sign-off.
+    environment: ${{ inputs.cloud == 'AzureUSGovernment' && 'gov-pilot' || 'comm-pilot' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install azd
+        uses: Azure/setup-azd@v2
+
+      - name: Select cloud (azd) + stage CI parameters
+        run: |
+          azd config set cloud.name "${{ inputs.cloud }}"
+          cp "${CI_PARAMS_FILE}" infra/main.parameters.json
+
+      - name: azd auth login (OIDC federated)
+        run: |
+          azd auth login \
+            --client-id "${{ vars.AZURE_CLIENT_ID }}" \
+            --tenant-id "${{ vars.AZURE_TENANT_ID }}" \
+            --federated-credential-provider github
+
+      - name: Azure CLI login (OIDC) — used by azd pre/post hooks
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          environment: ${{ inputs.cloud == 'AzureUSGovernment' && 'AzureUSGovernment' || 'AzureCloud' }}
+
+      - name: Provision (incremental, idempotent)
+        run: azd provision --no-prompt
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          APIM_PUBLISHER_EMAIL: ${{ vars.APIM_PUBLISHER_EMAIL }}
+          ENTRA_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          API_APP_ID_URI: ${{ vars.API_APP_ID_URI }}
+          API_AUDIENCE: ${{ vars.API_AUDIENCE }}

@@ -1,0 +1,117 @@
+<!--
+  ===========================================================================
+  Wizard-generated GenAI policy (Azure OpenAI backend), FIXED for the
+  GitHub Copilot CLI (BYOK).
+  ===========================================================================
+  AOAI twin of wizard-foundry-policy-fixed.xml. This is what the APIM
+  "Import Azure OpenAI" wizard generates for a kind=OpenAI account, with the
+  same two production fixes applied. The only meaningful differences from the
+  Foundry twin are:
+    - the backend id points at the Azure OpenAI endpoint, and
+    - it uses the azure-openai-* GenAI policies the AOAI wizard emits
+      (<azure-openai-emit-token-metric> / <azure-openai-token-limit>) instead
+      of the generic <llm-*> ones. They are functionally equivalent; the
+      AOAI-specific variants are kept here to stay faithful to the AOAI wizard
+      output.
+
+  WHAT WAS WRONG WITH THE RAW WIZARD POLICY (same as the Foundry twin)
+  -------------------------------------------------------------------
+  1) NO METRICS REACHED APP INSIGHTS.
+     <azure-openai-emit-token-metric> only emits when it can read a `usage`
+     object from the model response. Copilot CLI calls are STREAMING
+     (stream:true), and streamed responses OMIT `usage` unless the caller
+     sends `stream_options.include_usage = true`. Copilot CLI does not send
+     it, so nothing was emitted.
+        FIX A: inject `stream_options.include_usage = true` into streaming
+        request bodies (step below). Now every streamed response ends with a
+        usage chunk, so the token metric emits reliably.
+        FIX A2: also emit an always-on generic request counter
+        (<emit-metric value="1">) that does NOT depend on `usage`.
+
+  2) FREQUENT 429s.
+     The wizard set tokens-per-minute="10000" with estimate-prompt-tokens="true".
+     A Copilot CLI request is routinely 5k-15k tokens by itself, so the
+     pre-flight estimate alone exhausted a 10k/min budget.
+        FIX B: raise tokens-per-minute to a realistic cost SAFETY CEILING.
+
+  TUNING
+  ------
+  - tokens-per-minute is the per-minute safety ceiling; set it at or just
+    under the deployment's provisioned TPM quota. 10000 is far too low for
+    Copilot CLI; 200000 is a sane start.
+  - token-quota / token-quota-period is the monthly cost guard (3,000,000
+    tokens / month per subscription, unchanged from the wizard).
+  - counter-key keys on the APIM subscription id (one key per developer).
+  ===========================================================================
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service id="apim-generated-policy" backend-id="aoai-gov-copilot-pov-test-01-ai-endpoint" />
+
+    <!-- FIX A: ensure streamed responses carry a `usage` object so the token
+         metric below can actually emit. Only touches streaming JSON requests;
+         leaves non-streaming bodies untouched. -->
+    <set-body>@{
+        try {
+            var body = context.Request.Body?.As<JObject>(preserveContent: true);
+            if (body == null) { return context.Request.Body?.As<string>(preserveContent: true); }
+            var stream = body["stream"];
+            if (stream != null && stream.Type == JTokenType.Boolean && (bool)stream) {
+                var opts = body["stream_options"] as JObject;
+                if (opts == null) { opts = new JObject(); body["stream_options"] = opts; }
+                opts["include_usage"] = true;
+            }
+            return body.ToString();
+        } catch {
+            // If the body is not JSON we can parse, forward it unchanged.
+            return context.Request.Body?.As<string>(preserveContent: true);
+        }
+    }</set-body>
+
+    <!-- FIX A2: always-on request counter. Does NOT depend on `usage`, so
+         request telemetry is guaranteed regardless of streaming behaviour. -->
+    <emit-metric name="copilot_byok_request" value="1" namespace="copilot.byok">
+      <dimension name="API ID" />
+      <dimension name="Subscription ID" />
+      <dimension name="Product ID" />
+      <dimension name="Operation ID" />
+    </emit-metric>
+
+    <!-- Wizard token metric (now reliable thanks to FIX A). Emits prompt /
+         completion / total tokens parsed from the response `usage` object. -->
+    <azure-openai-emit-token-metric>
+      <dimension name="API ID" />
+      <dimension name="Client IP address" value="@(context.Request.IpAddress)" />
+      <dimension name="Gateway ID" />
+      <dimension name="Location" />
+      <dimension name="Operation ID" />
+      <dimension name="Product ID" />
+      <dimension name="Subscription ID" />
+      <dimension name="User ID" />
+    </azure-openai-emit-token-metric>
+
+    <!-- Wizard token limit, RE-TUNED (FIX B). tokens-per-minute is now a
+         realistic per-minute safety ceiling for a coding CLI instead of the
+         10000 default that 429'd on a single request. token-quota keeps the
+         monthly cost guard unchanged. -->
+    <azure-openai-token-limit
+        tokens-per-minute="200000"
+        token-quota="3000000"
+        token-quota-period="Monthly"
+        counter-key="@(context.Subscription.Id)"
+        estimate-prompt-tokens="true"
+        remaining-tokens-header-name="x-remaining-tpm-tokens"
+        remaining-quota-tokens-header-name="x-remaining-monthly-tokens"
+        tokens-consumed-header-name="x-consumed-tokens" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
